@@ -2,32 +2,33 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import { FastDomNode, createFastDomNode } from 'vs/base/browser/fastDomNode';
-import { ViewportData } from 'vs/editor/common/viewLayout/viewLinesViewportData';
-import * as viewEvents from 'vs/editor/common/view/viewEvents';
+import { FastDomNode, createFastDomNode } from '../../../base/browser/fastDomNode.js';
+import { createTrustedTypesPolicy } from '../../../base/browser/trustedTypes.js';
+import { BugIndicatingError } from '../../../base/common/errors.js';
+import { EditorOption } from '../../common/config/editorOptions.js';
+import { StringBuilder } from '../../common/core/stringBuilder.js';
+import * as viewEvents from '../../common/viewEvents.js';
+import { ViewportData } from '../../common/viewLayout/viewLinesViewportData.js';
+import { ViewContext } from '../../common/viewModel/viewContext.js';
 
 /**
  * Represents a visible line
  */
-export interface IVisibleLine {
-	getDomNode(): HTMLElement;
+export interface IVisibleLine extends ILine {
+	getDomNode(): HTMLElement | null;
 	setDomNode(domNode: HTMLElement): void;
-
-	onContentChanged(): void;
-	onTokensChanged(): void;
 
 	/**
 	 * Return null if the HTML should not be touched.
 	 * Return the new HTML otherwise.
 	 */
-	renderLine(lineNumber: number, deltaTop: number, viewportData: ViewportData): string;
+	renderLine(lineNumber: number, deltaTop: number, lineHeight: number, viewportData: ViewportData, sb: StringBuilder): boolean;
 
 	/**
 	 * Layout the line.
 	 */
-	layoutLine(lineNumber: number, deltaTop: number): void;
+	layoutLine(lineNumber: number, deltaTop: number, lineHeight: number): void;
 }
 
 export interface ILine {
@@ -35,13 +36,17 @@ export interface ILine {
 	onTokensChanged(): void;
 }
 
-export class RenderedLinesCollection<T extends ILine> {
-	private readonly _createLine: () => T;
-	private _lines: T[];
-	private _rendLineNumberStart: number;
+export interface ILineFactory<T extends ILine> {
+	createLine(): T;
+}
 
-	constructor(createLine: () => T) {
-		this._createLine = createLine;
+export class RenderedLinesCollection<T extends ILine> {
+	private _lines!: T[];
+	private _rendLineNumberStart!: number;
+
+	constructor(
+		private readonly _lineFactory: ILineFactory<T>,
+	) {
 		this._set(1, []);
 	}
 
@@ -54,7 +59,7 @@ export class RenderedLinesCollection<T extends ILine> {
 		this._rendLineNumberStart = rendLineNumberStart;
 	}
 
-	_get(): { rendLineNumberStart: number; lines: T[]; } {
+	_get(): { rendLineNumberStart: number; lines: T[] } {
 		return {
 			rendLineNumberStart: this._rendLineNumberStart,
 			lines: this._lines
@@ -80,9 +85,9 @@ export class RenderedLinesCollection<T extends ILine> {
 	}
 
 	public getLine(lineNumber: number): T {
-		let lineIndex = lineNumber - this._rendLineNumberStart;
+		const lineIndex = lineNumber - this._rendLineNumberStart;
 		if (lineIndex < 0 || lineIndex >= this._lines.length) {
-			throw new Error('Illegal value for lineNumber: ' + lineNumber);
+			throw new BugIndicatingError('Illegal value for lineNumber');
 		}
 		return this._lines[lineIndex];
 	}
@@ -90,18 +95,18 @@ export class RenderedLinesCollection<T extends ILine> {
 	/**
 	 * @returns Lines that were removed from this collection
 	 */
-	public onLinesDeleted(deleteFromLineNumber: number, deleteToLineNumber: number): T[] {
+	public onLinesDeleted(deleteFromLineNumber: number, deleteToLineNumber: number): T[] | null {
 		if (this.getCount() === 0) {
 			// no lines
 			return null;
 		}
 
-		let startLineNumber = this.getStartLineNumber();
-		let endLineNumber = this.getEndLineNumber();
+		const startLineNumber = this.getStartLineNumber();
+		const endLineNumber = this.getEndLineNumber();
 
 		if (deleteToLineNumber < startLineNumber) {
 			// deleting above the viewport
-			let deleteCnt = deleteToLineNumber - deleteFromLineNumber + 1;
+			const deleteCnt = deleteToLineNumber - deleteFromLineNumber + 1;
 			this._rendLineNumberStart -= deleteCnt;
 			return null;
 		}
@@ -115,7 +120,7 @@ export class RenderedLinesCollection<T extends ILine> {
 		let deleteStartIndex = 0;
 		let deleteCount = 0;
 		for (let lineNumber = startLineNumber; lineNumber <= endLineNumber; lineNumber++) {
-			let lineIndex = lineNumber - this._rendLineNumberStart;
+			const lineIndex = lineNumber - this._rendLineNumberStart;
 
 			if (deleteFromLineNumber <= lineNumber && lineNumber <= deleteToLineNumber) {
 				// this is a line to be deleted
@@ -144,18 +149,19 @@ export class RenderedLinesCollection<T extends ILine> {
 			this._rendLineNumberStart -= deleteAboveCount;
 		}
 
-		let deleted = this._lines.splice(deleteStartIndex, deleteCount);
+		const deleted = this._lines.splice(deleteStartIndex, deleteCount);
 		return deleted;
 	}
 
-	public onLinesChanged(changeFromLineNumber: number, changeToLineNumber: number): boolean {
+	public onLinesChanged(changeFromLineNumber: number, changeCount: number): boolean {
+		const changeToLineNumber = changeFromLineNumber + changeCount - 1;
 		if (this.getCount() === 0) {
 			// no lines
 			return false;
 		}
 
-		let startLineNumber = this.getStartLineNumber();
-		let endLineNumber = this.getEndLineNumber();
+		const startLineNumber = this.getStartLineNumber();
+		const endLineNumber = this.getEndLineNumber();
 
 		let someoneNotified = false;
 
@@ -170,15 +176,15 @@ export class RenderedLinesCollection<T extends ILine> {
 		return someoneNotified;
 	}
 
-	public onLinesInserted(insertFromLineNumber: number, insertToLineNumber: number): T[] {
+	public onLinesInserted(insertFromLineNumber: number, insertToLineNumber: number): T[] | null {
 		if (this.getCount() === 0) {
 			// no lines
 			return null;
 		}
 
-		let insertCnt = insertToLineNumber - insertFromLineNumber + 1;
-		let startLineNumber = this.getStartLineNumber();
-		let endLineNumber = this.getEndLineNumber();
+		const insertCnt = insertToLineNumber - insertFromLineNumber + 1;
+		const startLineNumber = this.getStartLineNumber();
+		const endLineNumber = this.getEndLineNumber();
 
 		if (insertFromLineNumber <= startLineNumber) {
 			// inserting above the viewport
@@ -193,48 +199,48 @@ export class RenderedLinesCollection<T extends ILine> {
 
 		if (insertCnt + insertFromLineNumber > endLineNumber) {
 			// insert inside the viewport in such a way that all remaining lines are pushed outside
-			let deleted = this._lines.splice(insertFromLineNumber - this._rendLineNumberStart, endLineNumber - insertFromLineNumber + 1);
+			const deleted = this._lines.splice(insertFromLineNumber - this._rendLineNumberStart, endLineNumber - insertFromLineNumber + 1);
 			return deleted;
 		}
 
 		// insert inside the viewport, push out some lines, but not all remaining lines
-		let newLines: T[] = [];
+		const newLines: T[] = [];
 		for (let i = 0; i < insertCnt; i++) {
-			newLines[i] = this._createLine();
+			newLines[i] = this._lineFactory.createLine();
 		}
-		let insertIndex = insertFromLineNumber - this._rendLineNumberStart;
-		let beforeLines = this._lines.slice(0, insertIndex);
-		let afterLines = this._lines.slice(insertIndex, this._lines.length - insertCnt);
-		let deletedLines = this._lines.slice(this._lines.length - insertCnt, this._lines.length);
+		const insertIndex = insertFromLineNumber - this._rendLineNumberStart;
+		const beforeLines = this._lines.slice(0, insertIndex);
+		const afterLines = this._lines.slice(insertIndex, this._lines.length - insertCnt);
+		const deletedLines = this._lines.slice(this._lines.length - insertCnt, this._lines.length);
 
 		this._lines = beforeLines.concat(newLines).concat(afterLines);
 
 		return deletedLines;
 	}
 
-	public onTokensChanged(ranges: { fromLineNumber: number; toLineNumber: number; }[]): boolean {
+	public onTokensChanged(ranges: { fromLineNumber: number; toLineNumber: number }[]): boolean {
 		if (this.getCount() === 0) {
 			// no lines
 			return false;
 		}
 
-		let startLineNumber = this.getStartLineNumber();
-		let endLineNumber = this.getEndLineNumber();
+		const startLineNumber = this.getStartLineNumber();
+		const endLineNumber = this.getEndLineNumber();
 
 		let notifiedSomeone = false;
 		for (let i = 0, len = ranges.length; i < len; i++) {
-			let rng = ranges[i];
+			const rng = ranges[i];
 
 			if (rng.toLineNumber < startLineNumber || rng.fromLineNumber > endLineNumber) {
 				// range outside viewport
 				continue;
 			}
 
-			let from = Math.max(startLineNumber, rng.fromLineNumber);
-			let to = Math.min(endLineNumber, rng.toLineNumber);
+			const from = Math.max(startLineNumber, rng.fromLineNumber);
+			const to = Math.min(endLineNumber, rng.toLineNumber);
 
 			for (let lineNumber = from; lineNumber <= to; lineNumber++) {
-				let lineIndex = lineNumber - this._rendLineNumberStart;
+				const lineIndex = lineNumber - this._rendLineNumberStart;
 				this._lines[lineIndex].onTokensChanged();
 				notifiedSomeone = true;
 			}
@@ -244,24 +250,21 @@ export class RenderedLinesCollection<T extends ILine> {
 	}
 }
 
-export interface IVisibleLinesHost<T extends IVisibleLine> {
-	createVisibleLine(): T;
-}
-
 export class VisibleLinesCollection<T extends IVisibleLine> {
 
-	private readonly _host: IVisibleLinesHost<T>;
 	public readonly domNode: FastDomNode<HTMLElement>;
 	private readonly _linesCollection: RenderedLinesCollection<T>;
 
-	constructor(host: IVisibleLinesHost<T>) {
-		this._host = host;
+	constructor(
+		private readonly _viewContext: ViewContext,
+		private readonly _lineFactory: ILineFactory<T>,
+	) {
 		this.domNode = this._createDomNode();
-		this._linesCollection = new RenderedLinesCollection<T>(() => this._host.createVisibleLine());
+		this._linesCollection = new RenderedLinesCollection<T>(this._lineFactory);
 	}
 
 	private _createDomNode(): FastDomNode<HTMLElement> {
-		let domNode = createFastDomNode(document.createElement('div'));
+		const domNode = createFastDomNode(document.createElement('div'));
 		domNode.setClassName('view-layer');
 		domNode.setPosition('absolute');
 		domNode.domNode.setAttribute('role', 'presentation');
@@ -272,28 +275,40 @@ export class VisibleLinesCollection<T extends IVisibleLine> {
 	// ---- begin view event handlers
 
 	public onConfigurationChanged(e: viewEvents.ViewConfigurationChangedEvent): boolean {
-		return e.layoutInfo;
+		if (e.hasChanged(EditorOption.layoutInfo)) {
+			return true;
+		}
+		return false;
 	}
 
-	public onFlushed(e: viewEvents.ViewFlushedEvent): boolean {
+	public onFlushed(e: viewEvents.ViewFlushedEvent, flushDom?: boolean): boolean {
+		// No need to clear the dom node because a full .innerHTML will occur in
+		// ViewLayerRenderer._render, however the fallback mechanism in the
+		// GPU renderer may cause this to be necessary as the .innerHTML call
+		// may not happen depending on the new state, leaving stale DOM nodes
+		// around.
+		if (flushDom) {
+			const start = this._linesCollection.getStartLineNumber();
+			const end = this._linesCollection.getEndLineNumber();
+			for (let i = start; i <= end; i++) {
+				this._linesCollection.getLine(i).getDomNode()?.remove();
+			}
+		}
 		this._linesCollection.flush();
-		// No need to clear the dom node because a full .innerHTML will occur in ViewLayerRenderer._render
 		return true;
 	}
 
 	public onLinesChanged(e: viewEvents.ViewLinesChangedEvent): boolean {
-		return this._linesCollection.onLinesChanged(e.fromLineNumber, e.toLineNumber);
+		return this._linesCollection.onLinesChanged(e.fromLineNumber, e.count);
 	}
 
 	public onLinesDeleted(e: viewEvents.ViewLinesDeletedEvent): boolean {
-		let deleted = this._linesCollection.onLinesDeleted(e.fromLineNumber, e.toLineNumber);
+		const deleted = this._linesCollection.onLinesDeleted(e.fromLineNumber, e.toLineNumber);
 		if (deleted) {
 			// Remove from DOM
 			for (let i = 0, len = deleted.length; i < len; i++) {
-				let lineDomNode = deleted[i].getDomNode();
-				if (lineDomNode) {
-					this.domNode.domNode.removeChild(lineDomNode);
-				}
+				const lineDomNode = deleted[i].getDomNode();
+				lineDomNode?.remove();
 			}
 		}
 
@@ -301,14 +316,12 @@ export class VisibleLinesCollection<T extends IVisibleLine> {
 	}
 
 	public onLinesInserted(e: viewEvents.ViewLinesInsertedEvent): boolean {
-		let deleted = this._linesCollection.onLinesInserted(e.fromLineNumber, e.toLineNumber);
+		const deleted = this._linesCollection.onLinesInserted(e.fromLineNumber, e.toLineNumber);
 		if (deleted) {
 			// Remove from DOM
 			for (let i = 0, len = deleted.length; i < len; i++) {
-				let lineDomNode = deleted[i].getDomNode();
-				if (lineDomNode) {
-					this.domNode.domNode.removeChild(lineDomNode);
-				}
+				const lineDomNode = deleted[i].getDomNode();
+				lineDomNode?.remove();
 			}
 		}
 
@@ -343,18 +356,18 @@ export class VisibleLinesCollection<T extends IVisibleLine> {
 
 	public renderLines(viewportData: ViewportData): void {
 
-		let inp = this._linesCollection._get();
+		const inp = this._linesCollection._get();
 
-		let renderer = new ViewLayerRenderer<T>(this.domNode.domNode, this._host, viewportData);
+		const renderer = new ViewLayerRenderer<T>(this.domNode.domNode, this._lineFactory, viewportData, this._viewContext);
 
-		let ctx: IRendererContext<T> = {
+		const ctx: IRendererContext<T> = {
 			rendLineNumberStart: inp.rendLineNumberStart,
 			lines: inp.lines,
 			linesLength: inp.lines.length
 		};
 
 		// Decide if this render will do a single update (single large .innerHTML) or many updates (inserting/removing dom nodes)
-		let resCtx = renderer.render(ctx, viewportData.startLineNumber, viewportData.endLineNumber, viewportData.relativeVerticalOffset);
+		const resCtx = renderer.render(ctx, viewportData.startLineNumber, viewportData.endLineNumber, viewportData.relativeVerticalOffset);
 
 		this._linesCollection._set(resCtx.rendLineNumberStart, resCtx.lines);
 	}
@@ -368,19 +381,19 @@ interface IRendererContext<T extends IVisibleLine> {
 
 class ViewLayerRenderer<T extends IVisibleLine> {
 
-	readonly domNode: HTMLElement;
-	readonly host: IVisibleLinesHost<T>;
-	readonly viewportData: ViewportData;
+	private static _ttPolicy = createTrustedTypesPolicy('editorViewLayer', { createHTML: value => value });
 
-	constructor(domNode: HTMLElement, host: IVisibleLinesHost<T>, viewportData: ViewportData) {
-		this.domNode = domNode;
-		this.host = host;
-		this.viewportData = viewportData;
+	constructor(
+		private readonly _domNode: HTMLElement,
+		private readonly _lineFactory: ILineFactory<T>,
+		private readonly _viewportData: ViewportData,
+		private readonly _viewContext: ViewContext
+	) {
 	}
 
 	public render(inContext: IRendererContext<T>, startLineNumber: number, stopLineNumber: number, deltaTop: number[]): IRendererContext<T> {
 
-		let ctx: IRendererContext<T> = {
+		const ctx: IRendererContext<T> = {
 			rendLineNumberStart: inContext.rendLineNumberStart,
 			lines: inContext.lines.slice(0),
 			linesLength: inContext.linesLength
@@ -392,7 +405,7 @@ class ViewLayerRenderer<T extends IVisibleLine> {
 			ctx.linesLength = stopLineNumber - startLineNumber + 1;
 			ctx.lines = [];
 			for (let x = startLineNumber; x <= stopLineNumber; x++) {
-				ctx.lines[x - startLineNumber] = this.host.createVisibleLine();
+				ctx.lines[x - startLineNumber] = this._lineFactory.createLine();
 			}
 			this._finishRendering(ctx, true, deltaTop);
 			return ctx;
@@ -409,15 +422,15 @@ class ViewLayerRenderer<T extends IVisibleLine> {
 
 		if (ctx.rendLineNumberStart > startLineNumber) {
 			// Insert lines before
-			let fromLineNumber = startLineNumber;
-			let toLineNumber = Math.min(stopLineNumber, ctx.rendLineNumberStart - 1);
+			const fromLineNumber = startLineNumber;
+			const toLineNumber = Math.min(stopLineNumber, ctx.rendLineNumberStart - 1);
 			if (fromLineNumber <= toLineNumber) {
 				this._insertLinesBefore(ctx, fromLineNumber, toLineNumber, deltaTop, startLineNumber);
 				ctx.linesLength += toLineNumber - fromLineNumber + 1;
 			}
 		} else if (ctx.rendLineNumberStart < startLineNumber) {
 			// Remove lines before
-			let removeCnt = Math.min(ctx.linesLength, startLineNumber - ctx.rendLineNumberStart);
+			const removeCnt = Math.min(ctx.linesLength, startLineNumber - ctx.rendLineNumberStart);
 			if (removeCnt > 0) {
 				this._removeLinesBefore(ctx, removeCnt);
 				ctx.linesLength -= removeCnt;
@@ -428,8 +441,8 @@ class ViewLayerRenderer<T extends IVisibleLine> {
 
 		if (ctx.rendLineNumberStart + ctx.linesLength - 1 < stopLineNumber) {
 			// Insert lines after
-			let fromLineNumber = ctx.rendLineNumberStart + ctx.linesLength;
-			let toLineNumber = stopLineNumber;
+			const fromLineNumber = ctx.rendLineNumberStart + ctx.linesLength;
+			const toLineNumber = stopLineNumber;
 
 			if (fromLineNumber <= toLineNumber) {
 				this._insertLinesAfter(ctx, fromLineNumber, toLineNumber, deltaTop, startLineNumber);
@@ -438,9 +451,9 @@ class ViewLayerRenderer<T extends IVisibleLine> {
 
 		} else if (ctx.rendLineNumberStart + ctx.linesLength - 1 > stopLineNumber) {
 			// Remove lines after
-			let fromLineNumber = Math.max(0, stopLineNumber - ctx.rendLineNumberStart + 1);
-			let toLineNumber = ctx.linesLength - 1;
-			let removeCnt = toLineNumber - fromLineNumber + 1;
+			const fromLineNumber = Math.max(0, stopLineNumber - ctx.rendLineNumberStart + 1);
+			const toLineNumber = ctx.linesLength - 1;
+			const removeCnt = toLineNumber - fromLineNumber + 1;
 
 			if (removeCnt > 0) {
 				this._removeLinesAfter(ctx, removeCnt);
@@ -458,62 +471,61 @@ class ViewLayerRenderer<T extends IVisibleLine> {
 		const lines = ctx.lines;
 
 		for (let i = startIndex; i <= endIndex; i++) {
-			let lineNumber = rendLineNumberStart + i;
-			lines[i].layoutLine(lineNumber, deltaTop[lineNumber - deltaLN]);
+			const lineNumber = rendLineNumberStart + i;
+			lines[i].layoutLine(lineNumber, deltaTop[lineNumber - deltaLN], this._lineHeightForLineNumber(lineNumber));
 		}
 	}
 
 	private _insertLinesBefore(ctx: IRendererContext<T>, fromLineNumber: number, toLineNumber: number, deltaTop: number[], deltaLN: number): void {
-		let newLines: T[] = [];
+		const newLines: T[] = [];
 		let newLinesLen = 0;
 		for (let lineNumber = fromLineNumber; lineNumber <= toLineNumber; lineNumber++) {
-			newLines[newLinesLen++] = this.host.createVisibleLine();
+			newLines[newLinesLen++] = this._lineFactory.createLine();
 		}
 		ctx.lines = newLines.concat(ctx.lines);
 	}
 
 	private _removeLinesBefore(ctx: IRendererContext<T>, removeCount: number): void {
 		for (let i = 0; i < removeCount; i++) {
-			let lineDomNode = ctx.lines[i].getDomNode();
-			if (lineDomNode) {
-				this.domNode.removeChild(lineDomNode);
-			}
+			const lineDomNode = ctx.lines[i].getDomNode();
+			lineDomNode?.remove();
 		}
 		ctx.lines.splice(0, removeCount);
 	}
 
 	private _insertLinesAfter(ctx: IRendererContext<T>, fromLineNumber: number, toLineNumber: number, deltaTop: number[], deltaLN: number): void {
-		let newLines: T[] = [];
+		const newLines: T[] = [];
 		let newLinesLen = 0;
 		for (let lineNumber = fromLineNumber; lineNumber <= toLineNumber; lineNumber++) {
-			newLines[newLinesLen++] = this.host.createVisibleLine();
+			newLines[newLinesLen++] = this._lineFactory.createLine();
 		}
 		ctx.lines = ctx.lines.concat(newLines);
 	}
 
 	private _removeLinesAfter(ctx: IRendererContext<T>, removeCount: number): void {
-		let removeIndex = ctx.linesLength - removeCount;
+		const removeIndex = ctx.linesLength - removeCount;
 
 		for (let i = 0; i < removeCount; i++) {
-			let lineDomNode = ctx.lines[removeIndex + i].getDomNode();
-			if (lineDomNode) {
-				this.domNode.removeChild(lineDomNode);
-			}
+			const lineDomNode = ctx.lines[removeIndex + i].getDomNode();
+			lineDomNode?.remove();
 		}
 		ctx.lines.splice(removeIndex, removeCount);
 	}
 
-	private _finishRenderingNewLines(ctx: IRendererContext<T>, domNodeIsEmpty: boolean, newLinesHTML: string[], wasNew: boolean[]): void {
-		let lastChild = <HTMLElement>this.domNode.lastChild;
+	private _finishRenderingNewLines(ctx: IRendererContext<T>, domNodeIsEmpty: boolean, newLinesHTML: string | TrustedHTML, wasNew: boolean[]): void {
+		if (ViewLayerRenderer._ttPolicy) {
+			newLinesHTML = ViewLayerRenderer._ttPolicy.createHTML(newLinesHTML as string);
+		}
+		const lastChild = <HTMLElement>this._domNode.lastChild;
 		if (domNodeIsEmpty || !lastChild) {
-			this.domNode.innerHTML = newLinesHTML.join('');
+			this._domNode.innerHTML = newLinesHTML as string; // explains the ugly casts -> https://github.com/microsoft/vscode/issues/106396#issuecomment-692625393;
 		} else {
-			lastChild.insertAdjacentHTML('afterend', newLinesHTML.join(''));
+			lastChild.insertAdjacentHTML('afterend', newLinesHTML as string);
 		}
 
-		let currChild = <HTMLElement>this.domNode.lastChild;
+		let currChild = <HTMLElement>this._domNode.lastChild;
 		for (let i = ctx.linesLength - 1; i >= 0; i--) {
-			let line = ctx.lines[i];
+			const line = ctx.lines[i];
 			if (wasNew[i]) {
 				line.setDomNode(currChild);
 				currChild = <HTMLElement>currChild.previousSibling;
@@ -521,63 +533,98 @@ class ViewLayerRenderer<T extends IVisibleLine> {
 		}
 	}
 
-	private _finishRenderingInvalidLines(ctx: IRendererContext<T>, invalidLinesHTML: string[], wasInvalid: boolean[]): void {
-		let hugeDomNode = document.createElement('div');
+	private _finishRenderingInvalidLines(ctx: IRendererContext<T>, invalidLinesHTML: string | TrustedHTML, wasInvalid: boolean[]): void {
+		const hugeDomNode = document.createElement('div');
 
-		hugeDomNode.innerHTML = invalidLinesHTML.join('');
+		if (ViewLayerRenderer._ttPolicy) {
+			invalidLinesHTML = ViewLayerRenderer._ttPolicy.createHTML(invalidLinesHTML as string);
+		}
+		hugeDomNode.innerHTML = invalidLinesHTML as string;
 
 		for (let i = 0; i < ctx.linesLength; i++) {
-			let line = ctx.lines[i];
+			const line = ctx.lines[i];
 			if (wasInvalid[i]) {
-				let source = <HTMLElement>hugeDomNode.firstChild;
-				let lineDomNode = line.getDomNode();
-				lineDomNode.parentNode.replaceChild(source, lineDomNode);
+				const source = <HTMLElement>hugeDomNode.firstChild;
+				const lineDomNode = line.getDomNode()!;
+				lineDomNode.replaceWith(source);
 				line.setDomNode(source);
 			}
 		}
 	}
 
+	private static readonly _sb = new StringBuilder(100000);
+
 	private _finishRendering(ctx: IRendererContext<T>, domNodeIsEmpty: boolean, deltaTop: number[]): void {
 
-		let hadNewLine = false;
-		let wasNew: boolean[] = [];
-		let newLinesHTML: string[] = [];
-		let hadInvalidLine = false;
-		let wasInvalid: boolean[] = [];
-		let invalidLinesHTML: string[] = [];
+		const sb = ViewLayerRenderer._sb;
+		const linesLength = ctx.linesLength;
+		const lines = ctx.lines;
+		const rendLineNumberStart = ctx.rendLineNumberStart;
 
-		for (let i = 0, len = ctx.linesLength; i < len; i++) {
-			let line = ctx.lines[i];
-			let lineNumber = i + ctx.rendLineNumberStart;
+		const wasNew: boolean[] = [];
+		{
+			sb.reset();
+			let hadNewLine = false;
 
-			wasNew[i] = false;
-			wasInvalid[i] = false;
+			for (let i = 0; i < linesLength; i++) {
+				const line = lines[i];
+				wasNew[i] = false;
 
-			let renderResult = line.renderLine(lineNumber, deltaTop[i], this.viewportData);
-
-			if (renderResult !== null) {
-				// Line needs rendering
-				let lineDomNode = line.getDomNode();
-				if (!lineDomNode) {
-					// Line is new
-					newLinesHTML.push(renderResult);
-					wasNew[i] = true;
-					hadNewLine = true;
-				} else {
-					// Line is invalid
-					invalidLinesHTML.push(renderResult);
-					wasInvalid[i] = true;
-					hadInvalidLine = true;
+				const lineDomNode = line.getDomNode();
+				if (lineDomNode) {
+					// line is not new
+					continue;
 				}
+
+				const renderedLineNumber = i + rendLineNumberStart;
+				const renderResult = line.renderLine(renderedLineNumber, deltaTop[i], this._lineHeightForLineNumber(renderedLineNumber), this._viewportData, sb);
+				if (!renderResult) {
+					// line does not need rendering
+					continue;
+				}
+
+				wasNew[i] = true;
+				hadNewLine = true;
+			}
+
+			if (hadNewLine) {
+				this._finishRenderingNewLines(ctx, domNodeIsEmpty, sb.build(), wasNew);
 			}
 		}
 
-		if (hadNewLine) {
-			this._finishRenderingNewLines(ctx, domNodeIsEmpty, newLinesHTML, wasNew);
-		}
+		{
+			sb.reset();
 
-		if (hadInvalidLine) {
-			this._finishRenderingInvalidLines(ctx, invalidLinesHTML, wasInvalid);
+			let hadInvalidLine = false;
+			const wasInvalid: boolean[] = [];
+
+			for (let i = 0; i < linesLength; i++) {
+				const line = lines[i];
+				wasInvalid[i] = false;
+
+				if (wasNew[i]) {
+					// line was new
+					continue;
+				}
+
+				const renderedLineNumber = i + rendLineNumberStart;
+				const renderResult = line.renderLine(renderedLineNumber, deltaTop[i], this._lineHeightForLineNumber(renderedLineNumber), this._viewportData, sb);
+				if (!renderResult) {
+					// line does not need rendering
+					continue;
+				}
+
+				wasInvalid[i] = true;
+				hadInvalidLine = true;
+			}
+
+			if (hadInvalidLine) {
+				this._finishRenderingInvalidLines(ctx, sb.build(), wasInvalid);
+			}
 		}
+	}
+
+	private _lineHeightForLineNumber(lineNumber: number): number {
+		return this._viewContext.viewLayout.getLineHeightForLineNumber(lineNumber);
 	}
 }

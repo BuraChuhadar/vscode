@@ -1,0 +1,113 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import { URI } from '../../../base/common/uri.js';
+import { IRange } from '../core/range.js';
+import { DiffFallbackReason, IDocumentDiff, IDocumentDiffProviderOptions } from '../diff/documentDiffProvider.js';
+import { LinesDiffValidity } from '../diff/verifyLinesDiff.js';
+import { IChange } from '../diff/legacyLinesDiffComputer.js';
+import { IColorInformation, IInplaceReplaceSupportResult, TextEdit } from '../languages.js';
+import { UnicodeHighlighterOptions } from './unicodeTextModelHighlighter.js';
+import { createDecorator } from '../../../platform/instantiation/common/instantiation.js';
+import type { EditorWorker } from './editorWebWorker.js';
+import { SectionHeader, FindSectionHeaderOptions } from './findSectionHeaders.js';
+import { StringEdit } from '../core/edits/stringEdit.js';
+
+export const IEditorWorkerService = createDecorator<IEditorWorkerService>('editorWorkerService');
+
+export type DiffAlgorithmName = 'legacy' | 'advanced' | 'advanced-external' | 'advanced-wasm';
+
+export interface IStringEditFromDiff {
+	readonly edit: StringEdit;
+	/** The diff timed out or used a replacement fallback after an error. */
+	readonly isCoarse: boolean;
+}
+
+export interface IStringDiffOptions {
+	readonly maxComputationTimeMs: number;
+	/** Preserve matching characters instead of coalescing display changes. Only supported by the built-in advanced algorithm. */
+	readonly computeRawChanges?: boolean;
+}
+
+export interface IEditorWorkerService {
+	readonly _serviceBrand: undefined;
+
+	canComputeUnicodeHighlights(uri: URI): boolean;
+	computedUnicodeHighlights(uri: URI, options: UnicodeHighlighterOptions, range?: IRange): Promise<IUnicodeHighlightsResult>;
+
+	/**
+	 * Implementation in {@link EditorWorker.$computeDiff}.
+	 * If `verify` is set, the worker also checks that the diff reproduces the modified text, see {@link IDocumentDiff.validity}.
+	 * This is linear in the document size, so it should only be requested for a sample of diffs.
+	 */
+	computeDiff(original: URI, modified: URI, options: IDocumentDiffProviderOptions, algorithm: DiffAlgorithmName, verify?: boolean): Promise<IDocumentDiff | null>;
+
+	canComputeDirtyDiff(original: URI, modified: URI): boolean;
+	computeDirtyDiff(original: URI, modified: URI, ignoreTrimWhitespace: boolean): Promise<IChange[] | null>;
+
+	computeMoreMinimalEdits(resource: URI, edits: TextEdit[] | null | undefined, pretty?: boolean): Promise<TextEdit[] | undefined>;
+	computeHumanReadableDiff(resource: URI, edits: TextEdit[] | null | undefined): Promise<TextEdit[] | undefined>;
+
+	computeStringEditFromDiff(original: string, modified: string, options: IStringDiffOptions, algorithm: DiffAlgorithmName): Promise<StringEdit>;
+	computeStringEditFromDiffWithMetadata(original: string, modified: string, options: IStringDiffOptions, algorithm: DiffAlgorithmName): Promise<IStringEditFromDiff>;
+
+	canComputeWordRanges(resource: URI): boolean;
+	computeWordRanges(resource: URI, range: IRange): Promise<{ [word: string]: IRange[] } | null>;
+
+	canNavigateValueSet(resource: URI): boolean;
+	navigateValueSet(resource: URI, range: IRange, up: boolean): Promise<IInplaceReplaceSupportResult | null>;
+
+	findSectionHeaders(uri: URI, options: FindSectionHeaderOptions): Promise<SectionHeader[]>;
+
+	computeDefaultDocumentColors(uri: URI): Promise<IColorInformation[] | null>;
+
+}
+
+export interface IDiffComputationResult {
+	quitEarly: boolean;
+	changes: ILineChange[];
+	identical: boolean;
+	moves: ITextMove[];
+	/** Only set if verification was requested. */
+	validity?: LinesDiffValidity;
+	/** Set if the result of the built-in algorithm was used instead of the requested one. */
+	fallback?: DiffFallbackReason;
+}
+
+export type ILineChange = [
+	originalStartLine: number,
+	originalEndLine: number,
+	modifiedStartLine: number,
+	modifiedEndLine: number,
+	charChanges: ICharChange[] | undefined,
+];
+
+export type ICharChange = [
+	originalStartLine: number,
+	originalStartColumn: number,
+	originalEndLine: number,
+	originalEndColumn: number,
+
+	modifiedStartLine: number,
+	modifiedStartColumn: number,
+	modifiedEndLine: number,
+	modifiedEndColumn: number,
+];
+
+export type ITextMove = [
+	originalStartLine: number,
+	originalEndLine: number,
+	modifiedStartLine: number,
+	modifiedEndLine: number,
+	changes: ILineChange[],
+];
+
+export interface IUnicodeHighlightsResult {
+	ranges: IRange[];
+	hasMore: boolean;
+	nonBasicAsciiCharacterCount: number;
+	invisibleCharacterCount: number;
+	ambiguousCharacterCount: number;
+}

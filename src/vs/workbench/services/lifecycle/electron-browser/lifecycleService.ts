@@ -2,101 +2,209 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import { TPromise } from 'vs/base/common/winjs.base';
-import Severity from 'vs/base/common/severity';
-import { toErrorMessage } from 'vs/base/common/errorMessage';
-import { ILifecycleService, ShutdownEvent, ShutdownReason } from 'vs/platform/lifecycle/common/lifecycle';
-import { IMessageService } from 'vs/platform/message/common/message';
-import { IWindowIPCService } from 'vs/workbench/services/window/electron-browser/windowService';
-import { ipcRenderer as ipc } from 'electron';
-import Event, { Emitter } from 'vs/base/common/event';
+import { handleVetos } from '../../../../platform/lifecycle/common/lifecycle.js';
+import { ShutdownReason, ILifecycleService, IWillShutdownEventJoiner, WillShutdownJoinerOrder } from '../common/lifecycle.js';
+import { IStorageService } from '../../../../platform/storage/common/storage.js';
+import { ipcRenderer } from '../../../../base/parts/sandbox/electron-browser/globals.js';
+import { ILogService } from '../../../../platform/log/common/log.js';
+import { AbstractLifecycleService } from '../common/lifecycleService.js';
+import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
+import { INativeHostService } from '../../../../platform/native/common/native.js';
+import { Promises, disposableTimeout, raceCancellation } from '../../../../base/common/async.js';
+import { toErrorMessage } from '../../../../base/common/errorMessage.js';
+import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
 
-export class LifecycleService implements ILifecycleService {
+export class NativeLifecycleService extends AbstractLifecycleService {
 
-	public _serviceBrand: any;
-
-	private _onWillShutdown = new Emitter<ShutdownEvent>();
-	private _onShutdown = new Emitter<ShutdownReason>();
-
-	private _willShutdown: boolean;
+	private static readonly BEFORE_SHUTDOWN_WARNING_DELAY = 5000;
+	private static readonly WILL_SHUTDOWN_WARNING_DELAY = 800;
 
 	constructor(
-		@IMessageService private messageService: IMessageService,
-		@IWindowIPCService private windowService: IWindowIPCService
+		@INativeHostService private readonly nativeHostService: INativeHostService,
+		@IStorageService storageService: IStorageService,
+		@ILogService logService: ILogService
 	) {
+		super(logService, storageService);
+
 		this.registerListeners();
 	}
 
-	public get willShutdown(): boolean {
-		return this._willShutdown;
-	}
-
-	public get onWillShutdown(): Event<ShutdownEvent> {
-		return this._onWillShutdown.event;
-	}
-
-	public get onShutdown(): Event<ShutdownReason> {
-		return this._onShutdown.event;
-	}
-
 	private registerListeners(): void {
-		const windowId = this.windowService.getWindowId();
+		const windowId = this.nativeHostService.windowId;
 
 		// Main side indicates that window is about to unload, check for vetos
-		ipc.on('vscode:beforeUnload', (event, reply: { okChannel: string, cancelChannel: string, reason: ShutdownReason }) => {
-			this._willShutdown = true;
+		ipcRenderer.on('vscode:onBeforeUnload', async (event: unknown, ...args: unknown[]) => {
+			const reply = args[0] as { okChannel: string; cancelChannel: string; reason: ShutdownReason };
+			this.logService.trace(`[lifecycle] onBeforeUnload (reason: ${reply.reason})`);
 
-			// trigger onWillShutdown events and veto collecting
-			this.onBeforeUnload(reply.reason).done(veto => {
-				if (veto) {
-					this._willShutdown = false; // reset this flag since the shutdown has been vetoed!
-					ipc.send(reply.cancelChannel, windowId);
-				} else {
-					this._onShutdown.fire(reply.reason);
-					ipc.send(reply.okChannel, windowId);
-				}
-			});
+			// trigger onBeforeShutdown events and veto collecting
+			const veto = await this.handleBeforeShutdown(reply.reason);
+
+			// veto: cancel unload
+			if (veto) {
+				this.logService.trace('[lifecycle] onBeforeUnload prevented via veto');
+
+				// Indicate as event
+				this._onShutdownVeto.fire();
+
+				ipcRenderer.send(reply.cancelChannel, windowId);
+			}
+
+			// no veto: allow unload
+			else {
+				this.logService.trace('[lifecycle] onBeforeUnload continues without veto');
+
+				this.shutdownReason = reply.reason;
+				ipcRenderer.send(reply.okChannel, windowId);
+			}
+		});
+
+		// Main side indicates that we will indeed shutdown
+		ipcRenderer.on('vscode:onWillUnload', async (event: unknown, ...args: unknown[]) => {
+			const reply = args[0] as { replyChannel: string; reason: ShutdownReason };
+			this.logService.trace(`[lifecycle] onWillUnload (reason: ${reply.reason})`);
+
+			// trigger onWillShutdown events and joining
+			await this.handleWillShutdown(reply.reason);
+
+			// trigger onDidShutdown event now that we know we will quit
+			this._onDidShutdown.fire();
+
+			// acknowledge to main side
+			ipcRenderer.send(reply.replyChannel, windowId);
 		});
 	}
 
-	private onBeforeUnload(reason: ShutdownReason): TPromise<boolean> {
-		const vetos: (boolean | TPromise<boolean>)[] = [];
+	protected async handleBeforeShutdown(reason: ShutdownReason): Promise<boolean> {
+		const logService = this.logService;
 
-		this._onWillShutdown.fire({
-			veto(value) {
+		const vetos: (boolean | Promise<boolean>)[] = [];
+		const pendingVetos = new Set<string>();
+
+		let finalVeto: (() => boolean | Promise<boolean>) | undefined = undefined;
+		let finalVetoId: string | undefined = undefined;
+
+		// before-shutdown event with veto support
+		this._onBeforeShutdown.fire({
+			reason,
+			veto(value, id) {
 				vetos.push(value);
+
+				// Log any veto instantly
+				if (value === true) {
+					logService.info(`[lifecycle]: Shutdown was prevented (id: ${id})`);
+				}
+
+				// Track promise completion
+				else if (value instanceof Promise) {
+					pendingVetos.add(id);
+					value.then(veto => {
+						if (veto === true) {
+							logService.info(`[lifecycle]: Shutdown was prevented (id: ${id})`);
+						}
+					}).finally(() => pendingVetos.delete(id));
+				}
 			},
-			reason
+			finalVeto(value, id) {
+				if (!finalVeto) {
+					finalVeto = value;
+					finalVetoId = id;
+				} else {
+					throw new Error(`[lifecycle]: Final veto is already defined (id: ${id})`);
+				}
+			}
 		});
 
-		if (vetos.length === 0) {
-			return TPromise.as(false);
-		}
+		const longRunningBeforeShutdownWarning = disposableTimeout(() => {
+			logService.warn(`[lifecycle] onBeforeShutdown is taking a long time, pending operations: ${Array.from(pendingVetos).join(', ')}`);
+		}, NativeLifecycleService.BEFORE_SHUTDOWN_WARNING_DELAY);
 
-		const promises: TPromise<void>[] = [];
-		let lazyValue = false;
+		try {
 
-		for (let valueOrPromise of vetos) {
-
-			// veto, done
-			if (valueOrPromise === true) {
-				return TPromise.as(true);
+			// First: run list of vetos in parallel
+			let veto = await handleVetos(vetos, error => this.handleBeforeShutdownError(error, reason));
+			if (veto) {
+				return veto;
 			}
 
-			if (TPromise.is(valueOrPromise)) {
-				promises.push(valueOrPromise.then(value => {
-					if (value) {
-						lazyValue = true; // veto, done
+			// Second: run the final veto if defined
+			if (finalVeto) {
+				try {
+					pendingVetos.add(finalVetoId as unknown as string);
+					veto = await (finalVeto as () => Promise<boolean>)();
+					if (veto) {
+						logService.info(`[lifecycle]: Shutdown was prevented by final veto (id: ${finalVetoId})`);
 					}
-				}, err => {
-					// error, treated like a veto, done
-					this.messageService.show(Severity.Error, toErrorMessage(err));
-					lazyValue = true;
-				}));
+				} catch (error) {
+					veto = true; // treat error as veto
+
+					this.handleBeforeShutdownError(error, reason);
+				}
 			}
+
+			return veto;
+		} finally {
+			longRunningBeforeShutdownWarning.dispose();
 		}
-		return TPromise.join(promises).then(() => lazyValue);
+	}
+
+	private handleBeforeShutdownError(error: Error, reason: ShutdownReason): void {
+		this.logService.error(`[lifecycle]: Error during before-shutdown phase (error: ${toErrorMessage(error)})`);
+
+		this._onBeforeShutdownError.fire({ reason, error });
+	}
+
+	protected async handleWillShutdown(reason: ShutdownReason): Promise<void> {
+		this._willShutdown = true;
+
+		const joiners: Promise<void>[] = [];
+		const lastJoiners: (() => Promise<void>)[] = [];
+		const pendingJoiners = new Set<IWillShutdownEventJoiner>();
+		const cts = new CancellationTokenSource();
+		this._onWillShutdown.fire({
+			reason,
+			token: cts.token,
+			joiners: () => Array.from(pendingJoiners.values()),
+			join(promiseOrPromiseFn, joiner) {
+				pendingJoiners.add(joiner);
+
+				if (joiner.order === WillShutdownJoinerOrder.Last) {
+					const promiseFn = typeof promiseOrPromiseFn === 'function' ? promiseOrPromiseFn : () => promiseOrPromiseFn;
+					lastJoiners.push(() => promiseFn().finally(() => pendingJoiners.delete(joiner)));
+				} else {
+					const promise = typeof promiseOrPromiseFn === 'function' ? promiseOrPromiseFn() : promiseOrPromiseFn;
+					promise.finally(() => pendingJoiners.delete(joiner));
+					joiners.push(promise);
+				}
+			},
+			force: () => {
+				cts.dispose(true);
+			}
+		});
+
+		const longRunningWillShutdownWarning = disposableTimeout(() => {
+			this.logService.warn(`[lifecycle] onWillShutdown is taking a long time, pending operations: ${Array.from(pendingJoiners).map(joiner => joiner.id).join(', ')}`);
+		}, NativeLifecycleService.WILL_SHUTDOWN_WARNING_DELAY);
+
+		try {
+			await raceCancellation(Promises.settled(joiners), cts.token);
+		} catch (error) {
+			this.logService.error(`[lifecycle]: Error during will-shutdown phase in default joiners (error: ${toErrorMessage(error)})`);
+		}
+
+		try {
+			await raceCancellation(Promises.settled(lastJoiners.map(lastJoiner => lastJoiner())), cts.token);
+		} catch (error) {
+			this.logService.error(`[lifecycle]: Error during will-shutdown phase in last joiners (error: ${toErrorMessage(error)})`);
+		}
+
+		longRunningWillShutdownWarning.dispose();
+	}
+
+	shutdown(): Promise<void> {
+		return this.nativeHostService.closeWindow();
 	}
 }
+
+registerSingleton(ILifecycleService, NativeLifecycleService, InstantiationType.Eager);

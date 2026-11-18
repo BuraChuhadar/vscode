@@ -3,41 +3,43 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
-
-import { TPromise } from 'vs/base/common/winjs.base';
-import { IChannel } from 'vs/base/parts/ipc/common/ipc';
-import { ITelemetryAppender } from 'vs/platform/telemetry/common/telemetryUtils';
+import { Event } from '../../../base/common/event.js';
+import { IChannel, IServerChannel } from '../../../base/parts/ipc/common/ipc.js';
+import { ITelemetryData } from './telemetry.js';
+import { ITelemetryAppender } from './telemetryUtils.js';
 
 export interface ITelemetryLog {
 	eventName: string;
-	data?: any;
+	data?: ITelemetryData;
 }
 
-export interface ITelemetryAppenderChannel extends IChannel {
-	call(command: 'log', data: ITelemetryLog): TPromise<void>;
-	call(command: string, arg: any): TPromise<any>;
-}
+export class TelemetryAppenderChannel implements IServerChannel {
 
-export class TelemetryAppenderChannel implements ITelemetryAppenderChannel {
+	constructor(private appenders: ITelemetryAppender[]) { }
 
-	constructor(private appender: ITelemetryAppender) { }
+	listen<T>(_: unknown, event: string): Event<T> {
+		throw new Error(`Event not found: ${event}`);
+	}
 
-	call(command: string, { eventName, data }: ITelemetryLog): TPromise<any> {
-		this.appender.log(eventName, data);
-		return TPromise.as(null);
+	call<T>(_: unknown, command: string, { eventName, data }: ITelemetryLog) {
+		this.appenders.forEach(a => a.log(eventName, data ?? {}));
+		return Promise.resolve(null as unknown as T);
 	}
 }
 
 export class TelemetryAppenderClient implements ITelemetryAppender {
 
-	constructor(private channel: ITelemetryAppenderChannel) { }
+	constructor(private channel: IChannel) { }
 
-	log(eventName: string, data?: any): any {
-		return this.channel.call('log', { eventName, data });
+	log(eventName: string, data?: unknown): unknown {
+		this.channel.call('log', { eventName, data })
+			.then(undefined, err => `Failed to log telemetry: ${console.warn(err)}`);
+
+		return Promise.resolve(null);
 	}
 
-	dispose(): any {
+	flush(): Promise<void> {
 		// TODO
+		return Promise.resolve();
 	}
 }

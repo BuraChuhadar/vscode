@@ -3,21 +3,20 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
+import { Event, RelativePattern, Uri, workspace } from 'vscode';
+import { IDisposable, anyEvent } from './util';
 
-import { EventEmitter, Event, Disposable } from 'vscode';
-import * as fs from 'fs';
-
-export interface FSEvent {
-	eventType: string;
-	filename: string;
+export interface IFileWatcher extends IDisposable {
+	readonly event: Event<Uri>;
 }
 
-export function watch(path: string): { event: Event<FSEvent>; disposable: Disposable; } {
-	const emitter = new EventEmitter<FSEvent>();
-	const event = emitter.event;
-	const watcher = fs.watch(path, (eventType, filename) => emitter.fire({ eventType, filename }));
-	const disposable = new Disposable(() => watcher.close());
+export function watch(location: string): IFileWatcher {
+	const watcher = workspace.createFileSystemWatcher(new RelativePattern(location, '*'));
 
-	return { event, disposable };
+	return new class implements IFileWatcher {
+		event = anyEvent(watcher.onDidCreate, watcher.onDidChange, watcher.onDidDelete);
+		dispose() {
+			watcher.dispose();
+		}
+	};
 }

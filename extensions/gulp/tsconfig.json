@@ -1,20 +1,14 @@
 {
+	"extends": "../tsconfig.base.json",
 	"compilerOptions": {
-		"target": "es6",
-		"module": "commonjs",
-		"lib": [
-			"es6",
-			"es2015.promise"
-		],
+		"rootDir": "./src",
 		"outDir": "./out",
-		"strictNullChecks": true,
-		"noImplicitAny": true,
-		"noImplicitReturns": true,
-		"noUnusedLocals": true,
-		"noUnusedParameters": true
+		"types": [
+			"node"
+		]
 	},
-	"exclude": [
-		"node_modules",
-		"out"
+	"include": [
+		"src/**/*",
+		"../../src/vscode-dts/vscode.d.ts"
 	]
 }

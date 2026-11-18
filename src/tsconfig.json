@@ -1,19 +1,39 @@
 {
+	"extends": "./tsconfig.base.json",
 	"compilerOptions": {
-		"module": "amd",
-		"moduleResolution": "classic",
-		"noImplicitAny": false,
+		"esModuleInterop": true,
 		"removeComments": false,
 		"preserveConstEnums": true,
-		"target": "es5",
 		"sourceMap": false,
-		"experimentalDecorators": true,
-		"declaration": true,
-		"noImplicitReturns": true,
-		"baseUrl": ".",
-		"typeRoots": [
-			"typings",
-			"../node_modules/@types"
+		"allowJs": true,
+		"resolveJsonModule": true,
+		"isolatedModules": false,
+		"skipLibCheck": true,
+		"outDir": "../out/vs",
+		"types": [
+			"@webgpu/types",
+			"mocha",
+			"semver",
+			"sinon",
+			"trusted-types",
+			"winreg",
+			"wicg-file-system-access"
+		],
+		"plugins": [
+			{
+				"name": "tsec",
+				"exemptionConfig": "./tsec.exemptions.json"
+			}
 		]
-	}
+	},
+	"include": [
+		"./*.ts",
+		"./typings",
+		"./vs/**/*.ts",
+		"./vscode-dts/vscode.proposed.*.d.ts",
+		"./vscode-dts/vscode.d.ts"
+	],
+	"exclude": [
+		"vs/workbench/contrib/webview/browser/pre/service-worker.js"
+	]
 }

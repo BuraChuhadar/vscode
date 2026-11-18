@@ -1,6 +1,6 @@
 {
 	"comments": {
-		"lineComment": ";"
+		"lineComment": ";;"
 	},
 	"brackets": [
 		["{", "}"],
@@ -11,12 +11,15 @@
 		["{", "}"],
 		["[", "]"],
 		["(", ")"],
-		["\"", "\""]
+		{ "open": "\"", "close": "\"", "notIn": ["string"] }
 	],
 	"surroundingPairs": [
 		["{", "}"],
 		["[", "]"],
 		["(", ")"],
 		["\"", "\""]
-	]
+	],
+	"folding": {
+		"offSide": true
+	}
 }

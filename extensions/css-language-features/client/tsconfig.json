@@ -1,0 +1,19 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"rootDir": "./src",
+		"outDir": "./out",
+		"lib": [
+			"ES2024",
+			"webworker"
+		],
+		"module": "Node16",
+		"types": [
+			"node"
+		]
+	},
+	"include": [
+		"src/**/*",
+		"../../../src/vscode-dts/vscode.d.ts"
+	]
+}

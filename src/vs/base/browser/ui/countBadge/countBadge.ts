@@ -3,22 +3,47 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
+import { $, append } from '../../dom.js';
+import { format } from '../../../common/strings.js';
+import './countBadge.css';
+import { Disposable, IDisposable, MutableDisposable, toDisposable } from '../../../common/lifecycle.js';
+import { getBaseLayerHoverDelegate } from '../hover/hoverDelegate2.js';
 
-import 'vs/css!./countBadge';
-import { $, append } from 'vs/base/browser/dom';
-import { format } from 'vs/base/common/strings';
+export interface ICountBadgeOptions {
+	readonly count?: number;
+	readonly countFormat?: string;
+	readonly titleFormat?: string;
+}
 
-export class CountBadge {
+export interface ICountBadgeStyles {
+	readonly badgeBackground: string | undefined;
+	readonly badgeForeground: string | undefined;
+	readonly badgeBorder: string | undefined;
+}
+
+export const unthemedCountStyles: ICountBadgeStyles = {
+	badgeBackground: '#4D4D4D',
+	badgeForeground: '#FFFFFF',
+	badgeBorder: undefined
+};
+
+export class CountBadge extends Disposable {
 
 	private element: HTMLElement;
-	private count: number;
+	private count: number = 0;
+	private countFormat: string;
 	private titleFormat: string;
+	private readonly hover = this._register(new MutableDisposable<IDisposable>());
 
-	constructor(container: HTMLElement, count?: number, titleFormat?: string) {
+	constructor(container: HTMLElement, private readonly options: ICountBadgeOptions, private readonly styles: ICountBadgeStyles) {
+
+		super();
 		this.element = append(container, $('.monaco-count-badge'));
-		this.titleFormat = titleFormat || '';
-		this.setCount(count || 0);
+		this._register(toDisposable(() => container.removeChild(this.element)));
+		this.countFormat = this.options.countFormat || '{0}';
+		this.titleFormat = this.options.titleFormat || '';
+		this.setCount(this.options.count || 0);
+		this.updateHover();
 	}
 
 	setCount(count: number) {
@@ -26,13 +51,33 @@ export class CountBadge {
 		this.render();
 	}
 
-	setTitleFormat(titleFormat: string) {
-		this.titleFormat = titleFormat;
+	setCountFormat(countFormat: string) {
+		this.countFormat = countFormat;
 		this.render();
 	}
 
+	setTitleFormat(titleFormat: string) {
+		this.titleFormat = titleFormat;
+		this.updateHover();
+		this.render();
+	}
+
+	private updateHover(): void {
+		if (this.titleFormat !== '' && !this.hover.value) {
+			this.hover.value = getBaseLayerHoverDelegate().setupDelayedHoverAtMouse(this.element, () => ({ content: format(this.titleFormat, this.count), appearance: { compact: true } }));
+		} else if (this.titleFormat === '' && this.hover.value) {
+			this.hover.value = undefined;
+		}
+	}
+
 	private render() {
-		this.element.textContent = '' + this.count;
-		this.element.title = format(this.titleFormat, this.count);
+		this.element.textContent = format(this.countFormat, this.count);
+
+		this.element.style.backgroundColor = this.styles.badgeBackground ?? '';
+		this.element.style.color = this.styles.badgeForeground ?? '';
+
+		if (this.styles.badgeBorder) {
+			this.element.style.border = `1px solid ${this.styles.badgeBorder}`;
+		}
 	}
 }

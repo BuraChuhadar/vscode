@@ -2,135 +2,183 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import * as Platform from 'vs/base/common/platform';
-import Event, { Emitter } from 'vs/base/common/event';
-import { IDisposable } from 'vs/base/common/lifecycle';
+import { CodeWindow, mainWindow } from './window.js';
+import { Emitter } from '../common/event.js';
+import { isIOS } from '../common/platform.js';
 
 class WindowManager {
 
-	public static INSTANCE = new WindowManager();
+	static readonly INSTANCE = new WindowManager();
 
-	private _fullscreen: boolean;
+	// --- Zoom Level
 
-	private _zoomLevel: number = 0;
-	private _zoomFactor: number = 0;
+	private readonly mapWindowIdToZoomLevel = new Map<number, number>();
 
-	private _pixelRatioCache: number = 0;
-	private _pixelRatioComputed: boolean = false;
+	private readonly _onDidChangeZoomLevel = new Emitter<number>();
+	readonly onDidChangeZoomLevel = this._onDidChangeZoomLevel.event;
 
-	private _onDidChangeZoomLevel: Emitter<number> = new Emitter<number>();
-	public onDidChangeZoomLevel: Event<number> = this._onDidChangeZoomLevel.event;
-
-	private _onDidChangeFullscreen: Emitter<void> = new Emitter<void>();
-	public onDidChangeFullscreen: Event<void> = this._onDidChangeFullscreen.event;
-
-	public getZoomLevel(): number {
-		return this._zoomLevel;
+	getZoomLevel(targetWindow: Window): number {
+		return this.mapWindowIdToZoomLevel.get(this.getWindowId(targetWindow)) ?? 0;
 	}
-
-	public setZoomLevel(zoomLevel: number): void {
-		if (this._zoomLevel === zoomLevel) {
+	setZoomLevel(zoomLevel: number, targetWindow: Window): void {
+		if (this.getZoomLevel(targetWindow) === zoomLevel) {
 			return;
 		}
 
-		this._zoomLevel = zoomLevel;
-		this._pixelRatioComputed = false;
-		this._onDidChangeZoomLevel.fire(this._zoomLevel);
+		const targetWindowId = this.getWindowId(targetWindow);
+		this.mapWindowIdToZoomLevel.set(targetWindowId, zoomLevel);
+		this._onDidChangeZoomLevel.fire(targetWindowId);
 	}
 
-	public getZoomFactor(): number {
-		return this._zoomFactor;
+	// --- Zoom Factor
+
+	private readonly mapWindowIdToZoomFactor = new Map<number, number>();
+
+	getZoomFactor(targetWindow: Window): number {
+		return this.mapWindowIdToZoomFactor.get(this.getWindowId(targetWindow)) ?? 1;
+	}
+	setZoomFactor(zoomFactor: number, targetWindow: Window): void {
+		this.mapWindowIdToZoomFactor.set(this.getWindowId(targetWindow), zoomFactor);
 	}
 
-	public setZoomFactor(zoomFactor: number): void {
-		this._zoomFactor = zoomFactor;
-	}
+	// --- Fullscreen
 
-	public getPixelRatio(): number {
-		if (!this._pixelRatioComputed) {
-			this._pixelRatioCache = this._computePixelRatio();
-			this._pixelRatioComputed = true;
-		}
-		return this._pixelRatioCache;
-	}
+	private readonly _onDidChangeFullscreen = new Emitter<number>();
+	readonly onDidChangeFullscreen = this._onDidChangeFullscreen.event;
 
-	private _computePixelRatio(): number {
-		let ctx = document.createElement('canvas').getContext('2d');
-		let dpr = window.devicePixelRatio || 1;
-		let bsr = (<any>ctx).webkitBackingStorePixelRatio ||
-			(<any>ctx).mozBackingStorePixelRatio ||
-			(<any>ctx).msBackingStorePixelRatio ||
-			(<any>ctx).oBackingStorePixelRatio ||
-			(<any>ctx).backingStorePixelRatio || 1;
-		return dpr / bsr;
-	}
+	private readonly mapWindowIdToFullScreen = new Map<number, boolean>();
 
-	public setFullscreen(fullscreen: boolean): void {
-		if (this._fullscreen === fullscreen) {
+	setFullscreen(fullscreen: boolean, targetWindow: Window): void {
+		if (this.isFullscreen(targetWindow) === fullscreen) {
 			return;
 		}
 
-		this._fullscreen = fullscreen;
-		this._onDidChangeFullscreen.fire();
+		const windowId = this.getWindowId(targetWindow);
+		this.mapWindowIdToFullScreen.set(windowId, fullscreen);
+		this._onDidChangeFullscreen.fire(windowId);
+	}
+	isFullscreen(targetWindow: Window): boolean {
+		return !!this.mapWindowIdToFullScreen.get(this.getWindowId(targetWindow));
 	}
 
-	public isFullscreen(): boolean {
-		return this._fullscreen;
+	private getWindowId(targetWindow: Window): number {
+		return (targetWindow as CodeWindow).vscodeWindowId;
 	}
+}
+
+export function addMatchMediaChangeListener(targetWindow: Window, query: string | MediaQueryList, callback: (this: MediaQueryList, ev: MediaQueryListEvent) => unknown): void {
+	if (typeof query === 'string') {
+		query = targetWindow.matchMedia(query);
+	}
+	query.addEventListener('change', callback);
 }
 
 /** A zoom index, e.g. 1, 2, 3 */
-export function getZoomLevel(): number {
-	return WindowManager.INSTANCE.getZoomLevel();
+export function setZoomLevel(zoomLevel: number, targetWindow: Window): void {
+	WindowManager.INSTANCE.setZoomLevel(zoomLevel, targetWindow);
 }
+export function getZoomLevel(targetWindow: Window): number {
+	return WindowManager.INSTANCE.getZoomLevel(targetWindow);
+}
+export const onDidChangeZoomLevel = WindowManager.INSTANCE.onDidChangeZoomLevel;
+
 /** The zoom scale for an index, e.g. 1, 1.2, 1.4 */
-export function getZoomFactor(): number {
-	return WindowManager.INSTANCE.getZoomFactor();
+export function getZoomFactor(targetWindow: Window): number {
+	return WindowManager.INSTANCE.getZoomFactor(targetWindow);
 }
-export function getPixelRatio(): number {
-	return WindowManager.INSTANCE.getPixelRatio();
+export function setZoomFactor(zoomFactor: number, targetWindow: Window): void {
+	WindowManager.INSTANCE.setZoomFactor(zoomFactor, targetWindow);
 }
-export function setZoomLevel(zoomLevel: number): void {
-	WindowManager.INSTANCE.setZoomLevel(zoomLevel);
+
+export function setFullscreen(fullscreen: boolean, targetWindow: Window): void {
+	WindowManager.INSTANCE.setFullscreen(fullscreen, targetWindow);
 }
-export function setZoomFactor(zoomFactor: number): void {
-	WindowManager.INSTANCE.setZoomFactor(zoomFactor);
+export function isFullscreen(targetWindow: Window): boolean {
+	return WindowManager.INSTANCE.isFullscreen(targetWindow);
 }
-export function onDidChangeZoomLevel(callback: (zoomLevel: number) => void): IDisposable {
-	return WindowManager.INSTANCE.onDidChangeZoomLevel(callback);
-}
-export function setFullscreen(fullscreen: boolean): void {
-	WindowManager.INSTANCE.setFullscreen(fullscreen);
-}
-export function isFullscreen(): boolean {
-	return WindowManager.INSTANCE.isFullscreen();
-}
-export function onDidChangeFullscreen(callback: () => void): IDisposable {
-	return WindowManager.INSTANCE.onDidChangeFullscreen(callback);
-}
+export const onDidChangeFullscreen = WindowManager.INSTANCE.onDidChangeFullscreen;
 
 const userAgent = navigator.userAgent;
 
-export const isIE = (userAgent.indexOf('Trident') >= 0);
-export const isEdge = (userAgent.indexOf('Edge/') >= 0);
-export const isEdgeOrIE = isIE || isEdge;
-
-export const isOpera = (userAgent.indexOf('Opera') >= 0);
 export const isFirefox = (userAgent.indexOf('Firefox') >= 0);
 export const isWebKit = (userAgent.indexOf('AppleWebKit') >= 0);
 export const isChrome = (userAgent.indexOf('Chrome') >= 0);
-export const isSafari = (userAgent.indexOf('Chrome') === -1) && (userAgent.indexOf('Safari') >= 0);
-export const isIPad = (userAgent.indexOf('iPad') >= 0);
+export const isSafari = (!isChrome && (userAgent.indexOf('Safari') >= 0));
+export const isWebkitWebView = (!isChrome && !isSafari && isWebKit);
+export const isElectron = (userAgent.indexOf('Electron/') >= 0);
+export const isAndroid = (userAgent.indexOf('Android') >= 0);
 
-export const canUseTranslate3d = !isFirefox;
+let standalone = false;
+if (typeof mainWindow.matchMedia === 'function') {
+	const standaloneMatchMedia = mainWindow.matchMedia('(display-mode: standalone) or (display-mode: window-controls-overlay)');
+	const fullScreenMatchMedia = mainWindow.matchMedia('(display-mode: fullscreen)');
+	standalone = standaloneMatchMedia.matches;
+	addMatchMediaChangeListener(mainWindow, standaloneMatchMedia, ({ matches }) => {
+		// entering fullscreen would change standaloneMatchMedia.matches to false
+		// if standalone is true (running as PWA) and entering fullscreen, skip this change
+		if (standalone && fullScreenMatchMedia.matches) {
+			return;
+		}
+		// otherwise update standalone (browser to PWA or PWA to browser)
+		standalone = matches;
+	});
+}
+export function isStandalone(): boolean {
+	return standalone;
+}
 
-export const enableEmptySelectionClipboard = isWebKit;
+/**
+ * Whether we are an installed web app (PWA) on a phone or tablet.
+ *
+ * These have no browser tab to fall back on, so anything a tab could recover from
+ * — a blocked popup, a navigation that lands somewhere unexpected — is a dead end
+ * here. Desktop installed apps still get real windows and are deliberately not
+ * included.
+ */
+export function isMobileStandalone(): boolean {
+	return isStandalone() && (isIOS || isAndroid);
+}
 
-export function supportsExecCommand(command: string): boolean {
-	return (
-		(isIE || Platform.isNative)
-		&& document.queryCommandSupported(command)
-	);
+// Visible means that the feature is enabled, not necessarily being rendered
+// e.g. visible is true even in fullscreen mode where the controls are hidden
+// See docs at https://developer.mozilla.org/en-US/docs/Web/API/WindowControlsOverlay/visible
+export function isWCOEnabled(): boolean {
+	return !!(navigator as Navigator & { windowControlsOverlay?: { visible: boolean } })?.windowControlsOverlay?.visible;
+}
+
+// Returns the bounding rect of the titlebar area if it is supported and defined
+// See docs at https://developer.mozilla.org/en-US/docs/Web/API/WindowControlsOverlay/getTitlebarAreaRect
+export function getWCOTitlebarAreaRect(targetWindow: Window): DOMRect | undefined {
+	return (targetWindow.navigator as Navigator & { windowControlsOverlay?: { getTitlebarAreaRect: () => DOMRect } })?.windowControlsOverlay?.getTitlebarAreaRect();
+}
+
+/**
+ * Returns the titlebar area rect of the given window only while its window
+ * controls overlay is visible. The value is read on every call.
+ */
+export function getVisibleWCOTitlebarAreaRect(targetWindow: Window): DOMRect | undefined {
+	const overlay = (targetWindow.navigator as Navigator & { windowControlsOverlay?: { visible: boolean; getTitlebarAreaRect: () => DOMRect } })?.windowControlsOverlay;
+	return overlay?.visible ? overlay.getTitlebarAreaRect() : undefined;
+}
+
+export interface IMonacoEnvironment {
+
+	createTrustedTypesPolicy?<Options extends TrustedTypePolicyOptions>(
+		policyName: string,
+		policyOptions?: Options,
+	): undefined | Pick<TrustedTypePolicy, 'name' | Extract<keyof Options, keyof TrustedTypePolicyOptions>>;
+
+	getWorker?(moduleId: string, label: string): Worker | Promise<Worker>;
+
+	getWorkerUrl?(moduleId: string, label: string): string;
+
+	globalAPI?: boolean;
+
+}
+interface IGlobalWithMonacoEnvironment {
+	MonacoEnvironment?: IMonacoEnvironment;
+}
+export function getMonacoEnvironment(): IMonacoEnvironment | undefined {
+	return (globalThis as IGlobalWithMonacoEnvironment).MonacoEnvironment;
 }

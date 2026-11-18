@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -e
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
 	realpath() { [[ $1 = /* ]] && echo "$1" || echo "$PWD/${1#./}"; }
@@ -11,32 +12,37 @@ cd $ROOT
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
 	NAME=`node -p "require('./product.json').nameLong"`
-	CODE="./.build/electron/$NAME.app/Contents/MacOS/Electron"
+	EXE_NAME=`node -p "require('./product.json').nameShort"`
+	CODE="./.build/electron/$NAME.app/Contents/MacOS/$EXE_NAME"
 else
 	NAME=`node -p "require('./product.json').applicationName"`
 	CODE=".build/electron/$NAME"
 fi
 
-INTENDED_VERSION="v`node -p "require('./package.json').electronVersion"`"
-INSTALLED_VERSION=$(cat .build/electron/version 2> /dev/null)
+VSCODECRASHDIR=$ROOT/.build/crashes
 
 # Node modules
-test -d node_modules || ./scripts/npm.sh install
+test -d node_modules || pnpm install
 
 # Get electron
-(test -f "$CODE" && [ $INTENDED_VERSION == $INSTALLED_VERSION ]) || ./node_modules/.bin/gulp electron
-
-# Build
-test -d out || ./node_modules/.bin/gulp compile
+if [[ -z "${VSCODE_SKIP_PRELAUNCH}" ]]; then
+	EXPECTED_ELECTRON_VERSION=$(node -p "require('./package.json').nativeBuild.target")
+	INSTALLED_ELECTRON_VERSION=$(cat .build/electron/version 2>/dev/null || true)
+	INSTALLED_ELECTRON_VERSION=${INSTALLED_ELECTRON_VERSION#v}
+	if [[ -n "${VSCODE_FORCE_PRELAUNCH:-}" || ! -x "$CODE" || "$INSTALLED_ELECTRON_VERSION" != "$EXPECTED_ELECTRON_VERSION" ]]; then
+		pnpm run electron
+	fi
+fi
 
 # Unit Tests
-export VSCODE_DEV=1
 if [[ "$OSTYPE" == "darwin"* ]]; then
-	cd $ROOT ; ulimit -n 4096 ; ELECTRON_RUN_AS_NODE=1 \
+	cd $ROOT ; ulimit -n 4096 ; \
+		ELECTRON_ENABLE_LOGGING=1 \
 		"$CODE" \
-		node_modules/mocha/bin/_mocha "$@"
+		test/unit/electron/index.js --crash-reporter-directory=$VSCODECRASHDIR "$@"
 else
-	cd $ROOT ; ELECTRON_RUN_AS_NODE=1 \
+	cd $ROOT ; \
+		ELECTRON_ENABLE_LOGGING=1 \
 		"$CODE" \
-		node_modules/mocha/bin/_mocha "$@"
+		test/unit/electron/index.js --crash-reporter-directory=$VSCODECRASHDIR "$@"
 fi

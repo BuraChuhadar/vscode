@@ -2,140 +2,144 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import * as dom from 'vs/base/browser/dom';
+export class FastDomNode<T extends HTMLElement> {
 
-export abstract class FastDomNode<T extends HTMLElement> {
+	private _maxWidth: string = '';
+	private _width: string = '';
+	private _height: string = '';
+	private _top: string = '';
+	private _left: string = '';
+	private _bottom: string = '';
+	private _right: string = '';
+	private _paddingTop: string = '';
+	private _paddingLeft: string = '';
+	private _paddingBottom: string = '';
+	private _paddingRight: string = '';
+	private _fontFamily: string = '';
+	private _fontWeight: string = '';
+	private _fontSize: string = '';
+	private _fontStyle: string = '';
+	private _fontFeatureSettings: string = '';
+	private _fontVariationSettings: string = '';
+	private _textDecoration: string = '';
+	private _lineHeight: string = '';
+	private _letterSpacing: string = '';
+	private _className: string = '';
+	private _display: string = '';
+	private _position: string = '';
+	private _visibility: string = '';
+	private _color: string = '';
+	private _backgroundColor: string = '';
+	private _layerHint: boolean = false;
+	private _contain: 'none' | 'strict' | 'content' | 'size' | 'layout' | 'style' | 'paint' = 'none';
+	private _boxShadow: string = '';
 
-	private _domNode: T;
-	private _maxWidth: number;
-	private _width: number;
-	private _height: number;
-	private _top: number;
-	private _left: number;
-	private _bottom: number;
-	private _right: number;
-	private _fontFamily: string;
-	private _fontWeight: string;
-	private _fontSize: number;
-	private _lineHeight: number;
-	private _className: string;
-	private _display: string;
-	private _position: string;
-	private _visibility: string;
-	private _transform: string;
+	constructor(
+		public readonly domNode: T
+	) { }
 
-	public get domNode(): T {
-		return this._domNode;
+	public focus(): void {
+		this.domNode.focus();
 	}
 
-	constructor(domNode: T) {
-		this._domNode = domNode;
-		this._maxWidth = -1;
-		this._width = -1;
-		this._height = -1;
-		this._top = -1;
-		this._left = -1;
-		this._bottom = -1;
-		this._right = -1;
-		this._fontFamily = '';
-		this._fontWeight = '';
-		this._fontSize = -1;
-		this._lineHeight = -1;
-		this._className = '';
-		this._display = '';
-		this._position = '';
-		this._visibility = '';
-		this._transform = '';
-	}
-
-	public setMaxWidth(maxWidth: number): void {
+	public setMaxWidth(_maxWidth: number | string): void {
+		const maxWidth = numberAsPixels(_maxWidth);
 		if (this._maxWidth === maxWidth) {
 			return;
 		}
 		this._maxWidth = maxWidth;
-		this._domNode.style.maxWidth = this._maxWidth + 'px';
+		this.domNode.style.maxWidth = this._maxWidth;
 	}
 
-	public setWidth(width: number): void {
+	public setWidth(_width: number | string): void {
+		const width = numberAsPixels(_width);
 		if (this._width === width) {
 			return;
 		}
 		this._width = width;
-		this._domNode.style.width = this._width + 'px';
+		this.domNode.style.width = this._width;
 	}
 
-	public unsetWidth(): void {
-		if (this._width === -1) {
-			return;
-		}
-		this._width = -1;
-		this._domNode.style.width = '';
-	}
-
-	public setHeight(height: number): void {
+	public setHeight(_height: number | string): void {
+		const height = numberAsPixels(_height);
 		if (this._height === height) {
 			return;
 		}
 		this._height = height;
-		this._domNode.style.height = this._height + 'px';
+		this.domNode.style.height = this._height;
 	}
 
-	public getHeight(): number {
-		return this._height;
-	}
-
-	public unsetHeight(): void {
-		if (this._height === -1) {
-			return;
-		}
-		this._height = -1;
-		this._domNode.style.height = '';
-	}
-
-	public setTop(top: number): void {
+	public setTop(_top: number | string): void {
+		const top = numberAsPixels(_top);
 		if (this._top === top) {
 			return;
 		}
 		this._top = top;
-		this._domNode.style.top = this._top + 'px';
+		this.domNode.style.top = this._top;
 	}
 
-	public getTop(): number {
-		return this._top;
-	}
-
-	public unsetTop(): void {
-		if (this._top === -1) {
-			return;
-		}
-		this._top = -1;
-		this._domNode.style.top = '';
-	}
-
-	public setLeft(left: number): void {
+	public setLeft(_left: number | string): void {
+		const left = numberAsPixels(_left);
 		if (this._left === left) {
 			return;
 		}
 		this._left = left;
-		this._domNode.style.left = this._left + 'px';
+		this.domNode.style.left = this._left;
 	}
 
-	public setBottom(bottom: number): void {
+	public setBottom(_bottom: number | string): void {
+		const bottom = numberAsPixels(_bottom);
 		if (this._bottom === bottom) {
 			return;
 		}
 		this._bottom = bottom;
-		this._domNode.style.bottom = this._bottom + 'px';
+		this.domNode.style.bottom = this._bottom;
 	}
 
-	public setRight(right: number): void {
+	public setRight(_right: number | string): void {
+		const right = numberAsPixels(_right);
 		if (this._right === right) {
 			return;
 		}
 		this._right = right;
-		this._domNode.style.right = this._right + 'px';
+		this.domNode.style.right = this._right;
+	}
+
+	public setPaddingTop(_paddingTop: number | string): void {
+		const paddingTop = numberAsPixels(_paddingTop);
+		if (this._paddingTop === paddingTop) {
+			return;
+		}
+		this._paddingTop = paddingTop;
+		this.domNode.style.paddingTop = this._paddingTop;
+	}
+
+	public setPaddingLeft(_paddingLeft: number | string): void {
+		const paddingLeft = numberAsPixels(_paddingLeft);
+		if (this._paddingLeft === paddingLeft) {
+			return;
+		}
+		this._paddingLeft = paddingLeft;
+		this.domNode.style.paddingLeft = this._paddingLeft;
+	}
+
+	public setPaddingBottom(_paddingBottom: number | string): void {
+		const paddingBottom = numberAsPixels(_paddingBottom);
+		if (this._paddingBottom === paddingBottom) {
+			return;
+		}
+		this._paddingBottom = paddingBottom;
+		this.domNode.style.paddingBottom = this._paddingBottom;
+	}
+
+	public setPaddingRight(_paddingRight: number | string): void {
+		const paddingRight = numberAsPixels(_paddingRight);
+		if (this._paddingRight === paddingRight) {
+			return;
+		}
+		this._paddingRight = paddingRight;
+		this.domNode.style.paddingRight = this._paddingRight;
 	}
 
 	public setFontFamily(fontFamily: string): void {
@@ -143,7 +147,7 @@ export abstract class FastDomNode<T extends HTMLElement> {
 			return;
 		}
 		this._fontFamily = fontFamily;
-		this._domNode.style.fontFamily = this._fontFamily;
+		this.domNode.style.fontFamily = this._fontFamily;
 	}
 
 	public setFontWeight(fontWeight: string): void {
@@ -151,23 +155,66 @@ export abstract class FastDomNode<T extends HTMLElement> {
 			return;
 		}
 		this._fontWeight = fontWeight;
-		this._domNode.style.fontWeight = this._fontWeight;
+		this.domNode.style.fontWeight = this._fontWeight;
 	}
 
-	public setFontSize(fontSize: number): void {
+	public setFontSize(_fontSize: number | string): void {
+		const fontSize = numberAsPixels(_fontSize);
 		if (this._fontSize === fontSize) {
 			return;
 		}
 		this._fontSize = fontSize;
-		this._domNode.style.fontSize = this._fontSize + 'px';
+		this.domNode.style.fontSize = this._fontSize;
 	}
 
-	public setLineHeight(lineHeight: number): void {
+	public setFontStyle(fontStyle: string): void {
+		if (this._fontStyle === fontStyle) {
+			return;
+		}
+		this._fontStyle = fontStyle;
+		this.domNode.style.fontStyle = this._fontStyle;
+	}
+
+	public setFontFeatureSettings(fontFeatureSettings: string): void {
+		if (this._fontFeatureSettings === fontFeatureSettings) {
+			return;
+		}
+		this._fontFeatureSettings = fontFeatureSettings;
+		this.domNode.style.fontFeatureSettings = this._fontFeatureSettings;
+	}
+
+	public setFontVariationSettings(fontVariationSettings: string): void {
+		if (this._fontVariationSettings === fontVariationSettings) {
+			return;
+		}
+		this._fontVariationSettings = fontVariationSettings;
+		this.domNode.style.fontVariationSettings = this._fontVariationSettings;
+	}
+
+	public setTextDecoration(textDecoration: string): void {
+		if (this._textDecoration === textDecoration) {
+			return;
+		}
+		this._textDecoration = textDecoration;
+		this.domNode.style.textDecoration = this._textDecoration;
+	}
+
+	public setLineHeight(_lineHeight: number | string): void {
+		const lineHeight = numberAsPixels(_lineHeight);
 		if (this._lineHeight === lineHeight) {
 			return;
 		}
 		this._lineHeight = lineHeight;
-		this._domNode.style.lineHeight = this._lineHeight + 'px';
+		this.domNode.style.lineHeight = this._lineHeight;
+	}
+
+	public setLetterSpacing(_letterSpacing: number | string): void {
+		const letterSpacing = numberAsPixels(_letterSpacing);
+		if (this._letterSpacing === letterSpacing) {
+			return;
+		}
+		this._letterSpacing = letterSpacing;
+		this.domNode.style.letterSpacing = this._letterSpacing;
 	}
 
 	public setClassName(className: string): void {
@@ -175,22 +222,12 @@ export abstract class FastDomNode<T extends HTMLElement> {
 			return;
 		}
 		this._className = className;
-		this._domNode.className = this._className;
+		this.domNode.className = this._className;
 	}
 
 	public toggleClassName(className: string, shouldHaveIt?: boolean): void {
-		dom.toggleClass(this._domNode, className, shouldHaveIt);
-		this._className = this._domNode.className;
-	}
-
-	public addClassName(className: string): void {
-		dom.addClass(this._domNode, className);
-		this._className = this._domNode.className;
-	}
-
-	public removeClassName(className: string): void {
-		dom.removeClass(this._domNode, className);
-		this._className = this._domNode.className;
+		this.domNode.classList.toggle(className, shouldHaveIt);
+		this._className = this.domNode.className;
 	}
 
 	public setDisplay(display: string): void {
@@ -198,7 +235,7 @@ export abstract class FastDomNode<T extends HTMLElement> {
 			return;
 		}
 		this._display = display;
-		this._domNode.style.display = this._display;
+		this.domNode.style.display = this._display;
 	}
 
 	public setPosition(position: string): void {
@@ -206,7 +243,7 @@ export abstract class FastDomNode<T extends HTMLElement> {
 			return;
 		}
 		this._position = position;
-		this._domNode.style.position = this._position;
+		this.domNode.style.position = this._position;
 	}
 
 	public setVisibility(visibility: string): void {
@@ -214,59 +251,70 @@ export abstract class FastDomNode<T extends HTMLElement> {
 			return;
 		}
 		this._visibility = visibility;
-		this._domNode.style.visibility = this._visibility;
+		this.domNode.style.visibility = this._visibility;
 	}
 
-	public setTransform(transform: string): void {
-		if (this._transform === transform) {
+	public setColor(color: string): void {
+		if (this._color === color) {
 			return;
 		}
-		this._transform = transform;
-		this._setTransform(this._domNode, this._transform);
+		this._color = color;
+		this.domNode.style.color = this._color;
 	}
 
-	protected abstract _setTransform(domNode: T, transform: string): void;
+	public setBackgroundColor(backgroundColor: string): void {
+		if (this._backgroundColor === backgroundColor) {
+			return;
+		}
+		this._backgroundColor = backgroundColor;
+		this.domNode.style.backgroundColor = this._backgroundColor;
+	}
+
+	public setLayerHinting(layerHint: boolean): void {
+		if (this._layerHint === layerHint) {
+			return;
+		}
+		this._layerHint = layerHint;
+		this.domNode.style.transform = this._layerHint ? 'translate3d(0px, 0px, 0px)' : '';
+	}
+
+	public setBoxShadow(boxShadow: string): void {
+		if (this._boxShadow === boxShadow) {
+			return;
+		}
+		this._boxShadow = boxShadow;
+		this.domNode.style.boxShadow = boxShadow;
+	}
+
+	public setContain(contain: 'none' | 'strict' | 'content' | 'size' | 'layout' | 'style' | 'paint'): void {
+		if (this._contain === contain) {
+			return;
+		}
+		this._contain = contain;
+		this.domNode.style.contain = this._contain;
+	}
 
 	public setAttribute(name: string, value: string): void {
-		this._domNode.setAttribute(name, value);
-	}
-
-	public getAttribute(name: string): string {
-		return this._domNode.getAttribute(name);
+		this.domNode.setAttribute(name, value);
 	}
 
 	public removeAttribute(name: string): void {
-		this._domNode.removeAttribute(name);
+		this.domNode.removeAttribute(name);
 	}
 
-	public hasAttribute(name: string): boolean {
-		return this._domNode.hasAttribute(name);
+	public appendChild(child: FastDomNode<T>): void {
+		this.domNode.appendChild(child.domNode);
+	}
+
+	public removeChild(child: FastDomNode<T>): void {
+		this.domNode.removeChild(child.domNode);
 	}
 }
 
-class WebKitFastDomNode<T extends HTMLElement> extends FastDomNode<T> {
-	protected _setTransform(domNode: T, transform: string): void {
-		(<any>domNode.style).webkitTransform = transform;
-	}
+function numberAsPixels(value: number | string): string {
+	return (typeof value === 'number' ? `${value}px` : value);
 }
 
-class StandardFastDomNode<T extends HTMLElement> extends FastDomNode<T> {
-	protected _setTransform(domNode: T, transform: string): void {
-		domNode.style.transform = transform;
-	}
-}
-
-let useWebKitFastDomNode = false;
-(function () {
-	let testDomNode = document.createElement('div');
-	if (typeof (<any>testDomNode.style).webkitTransform !== 'undefined') {
-		useWebKitFastDomNode = true;
-	}
-})();
 export function createFastDomNode<T extends HTMLElement>(domNode: T): FastDomNode<T> {
-	if (useWebKitFastDomNode) {
-		return new WebKitFastDomNode(domNode);
-	} else {
-		return new StandardFastDomNode(domNode);
-	}
+	return new FastDomNode(domNode);
 }

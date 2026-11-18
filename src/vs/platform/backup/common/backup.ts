@@ -3,28 +3,27 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import { TPromise } from 'vs/base/common/winjs.base';
+import { URI } from '../../../base/common/uri.js';
+import { IWorkspaceIdentifier } from '../../workspace/common/workspace.js';
 
-export interface IBackupWorkspacesFormat {
-	folderWorkspaces: string[];
-	emptyWorkspaces: string[];
+export const WORKING_COPY_BACKUP_TEMP_FILE_SUFFIX = '.vsctmp';
+
+export interface IBaseBackupInfo {
+	remoteAuthority?: string;
 }
 
-export const IBackupMainService = createDecorator<IBackupMainService>('backupMainService');
-export const IBackupService = createDecorator<IBackupService>('backupService');
-
-export interface IBackupMainService extends IBackupService {
-	_serviceBrand: any;
-
-	getWorkspaceBackupPaths(): string[];
-	getEmptyWorkspaceBackupPaths(): string[];
-
-	registerWindowForBackupsSync(windowId: number, isEmptyWorkspace: boolean, backupFolder?: string, workspacePath?: string): void;
+export interface IWorkspaceBackupInfo extends IBaseBackupInfo {
+	readonly workspace: IWorkspaceIdentifier;
 }
 
-export interface IBackupService {
-	_serviceBrand: any;
+export interface IFolderBackupInfo extends IBaseBackupInfo {
+	readonly folderUri: URI;
+}
 
-	getBackupPath(windowId: number): TPromise<string>;
+export function isFolderBackupInfo(curr: IWorkspaceBackupInfo | IFolderBackupInfo): curr is IFolderBackupInfo {
+	return curr?.hasOwnProperty('folderUri');
+}
+
+export function isWorkspaceBackupInfo(curr: IWorkspaceBackupInfo | IFolderBackupInfo): curr is IWorkspaceBackupInfo {
+	return curr?.hasOwnProperty('workspace');
 }

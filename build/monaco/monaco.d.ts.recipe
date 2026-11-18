@@ -1,87 +1,151 @@
-declare module monaco {
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 
-    interface Thenable<T> {
-        /**
-         * Attaches callbacks for the resolution and/or rejection of the Promise.
-         * @param onfulfilled The callback to execute when the Promise is resolved.
-         * @param onrejected The callback to execute when the Promise is rejected.
-         * @returns A Promise for the completion of which ever callback is executed.
-         */
-        then<TResult>(onfulfilled?: (value: T) => TResult | Thenable<TResult>, onrejected?: (reason: any) => TResult | Thenable<TResult>): Thenable<TResult>;
-        then<TResult>(onfulfilled?: (value: T) => TResult | Thenable<TResult>, onrejected?: (reason: any) => void): Thenable<TResult>;
-    }
+// eslint-disable-next-line no-var
+declare var MonacoEnvironment: monaco.Environment | undefined;
 
-    export interface IDisposable {
-        dispose(): void;
-    }
+declare namespace monaco {
 
-    export interface IEvent<T> {
-        (listener: (e: T) => any, thisArg?: any): IDisposable;
-    }
+	export type Thenable<T> = PromiseLike<T>;
 
-    /**
-     * A helper that allows to emit and listen to typed events
-     */
-    export class Emitter<T> {
-        constructor();
-        readonly event: Event<T>;
-        fire(event?: T): void;
-        dispose(): void;
-    }
+	export interface Environment {
+		/**
+		 * Define a global `monaco` symbol.
+		 * This is true by default in AMD and false by default in ESM.
+		 */
+		globalAPI?: boolean;
+		/**
+		 * The base url where the editor sources are found (which contains the vs folder)
+		 */
+		baseUrl?: string;
+		/**
+		 * A web worker factory.
+		 * NOTE: If `getWorker` is defined, `getWorkerUrl` is not invoked.
+		 */
+		getWorker?(workerId: string, label: string): Promise<Worker> | Worker;
+		/**
+		 * Return the location for web worker scripts.
+		 * NOTE: If `getWorker` is defined, `getWorkerUrl` is not invoked.
+		 */
+		getWorkerUrl?(workerId: string, label: string): string;
+		/**
+		 * Create a trusted types policy (same API as window.trustedTypes.createPolicy)
+		 */
+		createTrustedTypesPolicy?(
+			policyName: string,
+			policyOptions?: ITrustedTypePolicyOptions,
+		): undefined | ITrustedTypePolicy;
+	}
 
-    export enum Severity {
-        Ignore = 0,
-        Info = 1,
-        Warning = 2,
-        Error = 3,
-    }
+	export interface ITrustedTypePolicyOptions {
+		createHTML?: (input: string, ...arguments: any[]) => string;
+		createScript?: (input: string, ...arguments: any[]) => string;
+		createScriptURL?: (input: string, ...arguments: any[]) => string;
+	}
 
-#include(vs/base/common/winjs.base.d.ts): TValueCallback, ProgressCallback, TPromise
-#include(vs/base/common/cancellation): CancellationTokenSource, CancellationToken
-#include(vs/base/common/uri): URI
-#include(vs/editor/common/standalone/standaloneBase): KeyCode, KeyMod
-#include(vs/base/common/htmlContent): MarkedString
-#include(vs/base/browser/keyboardEvent): IKeyboardEvent
-#include(vs/base/browser/mouseEvent): IMouseEvent
-#include(vs/editor/common/editorCommon): IScrollEvent, IPosition, IRange, ISelection
-#include(vs/editor/common/core/position): Position
-#include(vs/editor/common/core/range): Range
-#include(vs/editor/common/core/selection): Selection, SelectionDirection
-#include(vs/editor/common/core/token): Token
+	export interface ITrustedTypePolicy {
+		readonly name: string;
+		createHTML?(input: string): any;
+		createScript?(input: string): any;
+		createScriptURL?(input: string): any;
+	}
+
+	export interface IDisposable {
+		dispose(): void;
+	}
+
+	export interface IEvent<T> {
+		(listener: (e: T) => any, thisArg?: any): IDisposable;
+	}
+
+	/**
+	 * A helper that allows to emit and listen to typed events
+	 */
+	export class Emitter<T> {
+		constructor();
+		readonly event: Event<T>;
+		fire(event: T): void;
+		dispose(): void;
+	}
+
+#include(vs/platform/markers/common/markers.js): MarkerTag, MarkerSeverity
+#include(vs/base/common/cancellation.js): CancellationTokenSource, CancellationToken
+#include(vs/base/common/uri.js): URI, UriComponents
+#include(vs/base/common/keyCodes.js): KeyCode
+#include(vs/editor/common/services/editorBaseApi.js): KeyMod
+#include(vs/base/common/htmlContent.js): IMarkdownString, MarkdownStringTrustedOptions
+#include(vs/base/browser/keyboardEvent.js): IKeyboardEvent
+#include(vs/base/browser/mouseEvent.js): IMouseEvent
+#include(vs/editor/common/editorCommon.js): IScrollEvent
+#include(vs/editor/common/core/position.js): IPosition, Position
+#include(vs/editor/common/core/range.js): IRange, Range
+#include(vs/editor/common/core/selection.js): ISelection, Selection, SelectionDirection
+#include(vs/editor/common/languages.js): Token
 }
 
-declare module monaco.editor {
-
-#includeAll(vs/editor/browser/standalone/standaloneEditor;modes.=>languages.;editorCommon.=>):
-#include(vs/editor/common/services/standaloneThemeService): BuiltinTheme, IStandaloneThemeData, IColors
-#include(vs/editor/common/modes/supports/tokenization): ITokenThemeRule
-#include(vs/editor/common/services/webWorker): MonacoWebWorker, IWebWorkerOptions
-#include(vs/editor/browser/standalone/standaloneCodeEditor): IEditorConstructionOptions, IDiffEditorConstructionOptions, IStandaloneCodeEditor, IStandaloneDiffEditor
+declare namespace monaco.editor {
+#includeAll(vs/editor/standalone/browser/standaloneEditor.js;languages.Token=>Token):
+#include(vs/editor/standalone/common/standaloneTheme.js): BuiltinTheme, IStandaloneThemeData, IColors
+#include(vs/editor/common/languages/supports/tokenization.js): ITokenThemeRule
+#include(vs/editor/standalone/browser/standaloneWebWorker.js): MonacoWebWorker, IInternalWebWorkerOptions
+#include(vs/editor/standalone/browser/standaloneCodeEditor.js): IActionDescriptor, IGlobalEditorOptions, IStandaloneEditorConstructionOptions, IStandaloneDiffEditorConstructionOptions, IStandaloneCodeEditor, IStandaloneDiffEditor
 export interface ICommandHandler {
-    (...args:any[]): void;
+	(...args: any[]): void;
 }
-#include(vs/platform/contextkey/common/contextkey): IContextKey
-#include(vs/editor/browser/standalone/standaloneServices): IEditorOverrideServices
-#include(vs/platform/markers/common/markers): IMarkerData
-#include(vs/editor/browser/standalone/colorizer): IColorizerOptions, IColorizerElementOptions
-#include(vs/base/common/scrollable): ScrollbarVisibility
-#includeAll(vs/editor/common/editorCommon;IMode=>languages.IMode;LanguageIdentifier=>languages.LanguageIdentifier): IPosition, IRange, ISelection, SelectionDirection, IScrollEvent
-#includeAll(vs/editor/browser/editorBrowser;editorCommon.=>):
-#include(vs/editor/common/config/fontInfo): FontInfo, BareFontInfo
+export interface ILocalizedString {
+	original: string;
+	value: string;
+}
+export interface ICommandMetadata {
+	readonly description: ILocalizedString | string;
+}
+#include(vs/platform/contextkey/common/contextkey.js): IContextKey, ContextKeyValue
+#include(vs/editor/standalone/browser/standaloneServices.js): IEditorOverrideServices
+#include(vs/platform/markers/common/markers.js): IMarker, IMarkerData, IRelatedInformation
+#include(vs/editor/standalone/browser/colorizer.js): IColorizerOptions, IColorizerElementOptions
+#include(vs/base/common/scrollable.js): ScrollbarVisibility
+#include(vs/base/common/themables.js): ThemeColor, ThemeIcon
+#include(vs/editor/common/core/editOperation.js): ISingleEditOperation
+#include(vs/editor/common/core/wordHelper.js): IWordAtPosition
+#includeAll(vs/editor/common/model.js): IScrollEvent
+#include(vs/editor/common/diff/legacyLinesDiffComputer.js): IChange, ICharChange, ILineChange
+#include(vs/editor/common/core/2d/dimension.js): IDimension
+#includeAll(vs/editor/common/editorCommon.js): IScrollEvent
+#includeAll(vs/editor/common/textModelEvents.js):
+#include(vs/editor/common/model/mirrorTextModel.js): IModelContentChange
+#includeAll(vs/editor/common/cursorEvents.js):
+#include(vs/platform/accessibility/common/accessibility.js): AccessibilitySupport
+#includeAll(vs/editor/common/config/editorOptions.js):
+#include(vs/editor/browser/config/editorConfiguration.js): IEditorConstructionOptions
+#includeAll(vs/editor/browser/editorBrowser.js;editorCommon.=>):
+#include(vs/editor/common/config/fontInfo.js): FontInfo, BareFontInfo
+#include(vs/editor/common/config/editorZoom.js): EditorZoom, IEditorZoom
+
+//compatibility:
+export type IReadOnlyModel = ITextModel;
+export type IModel = ITextModel;
 }
 
-declare module monaco.languages {
+declare namespace monaco.languages {
 
-#includeAll(vs/editor/browser/standalone/standaloneLanguages;modes.=>;editorCommon.=>editor.;IMarkerData=>editor.IMarkerData):
-#includeAll(vs/editor/common/modes/languageConfiguration):
-#includeAll(vs/editor/common/modes;editorCommon.IRange=>IRange;editorCommon.IPosition=>IPosition;editorCommon.=>editor.):
-#include(vs/editor/common/services/modeService): ILanguageExtensionPoint
-#includeAll(vs/editor/common/modes/monarch/monarchTypes):
+#include(vs/editor/common/textModelEditSource.js): EditDeltaInfo
+#include(vs/base/common/glob.js): IRelativePattern
+#include(vs/editor/common/languageSelector.js): LanguageSelector, LanguageFilter
+#includeAll(vs/editor/standalone/browser/standaloneLanguages.js;languages.=>;editorCommon.=>editor.;model.=>editor.;IMarkerData=>editor.IMarkerData):
+#includeAll(vs/editor/common/languages/languageConfiguration.js):
+#includeAll(vs/editor/common/languages.js;IMarkerData=>editor.IMarkerData;ISingleEditOperation=>editor.ISingleEditOperation;model.=>editor.;ThemeIcon=>editor.ThemeIcon): Token
+#include(vs/editor/common/languages/language.js): ILanguageExtensionPoint
+#includeAll(vs/editor/standalone/common/monarch/monarchTypes.js):
+
+}
+
+declare namespace monaco.worker {
+
+#include(vs/editor/common/model/mirrorTextModel.js): IMirrorTextModel
+#includeAll(vs/editor/common/services/editorWebWorker.js;):
 
 }
 
-declare module monaco.worker {
-
-#includeAll(vs/editor/common/services/editorSimpleWorker;):
-
-}
+//dtsv=3

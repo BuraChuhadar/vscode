@@ -3,18 +3,17 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as getmac from 'getmac';
-import * as crypto from 'crypto';
-import { TPromise } from 'vs/base/common/winjs.base';
-import * as errors from 'vs/base/common/errors';
-import * as uuid from 'vs/base/common/uuid';
 import { networkInterfaces } from 'os';
-import { TrieMap } from 'vs/base/common/map';
+import { TernarySearchTree } from '../common/ternarySearchTree.js';
+import * as uuid from '../common/uuid.js';
+import { getMac } from './macAddress.js';
+import { isWindows } from '../common/platform.js';
+import { stripUTF8BOM } from '../common/strings.js';
 
 // http://www.techrepublic.com/blog/data-center/mac-address-scorecard-for-common-virtual-machine-platforms/
 // VMware ESX 3, Server, Workstation, Player	00-50-56, 00-0C-29, 00-05-69
 // Microsoft Hyper-V, Virtual Server, Virtual PC	00-03-FF
-// Parallells Desktop, Workstation, Server, Virtuozzo	00-1C-42
+// Parallels Desktop, Workstation, Server, Virtuozzo	00-1C-42
 // Virtual Iron 4	00-0F-4B
 // Red Hat Xen	00-16-3E
 // Oracle VM	00-16-3E
@@ -23,20 +22,32 @@ import { TrieMap } from 'vs/base/common/map';
 // Sun xVM VirtualBox	08-00-27
 export const virtualMachineHint: { value(): number } = new class {
 
-	private _virtualMachineOUIs: TrieMap<boolean>;
-	private _value: number;
+	private _virtualMachineOUIs?: TernarySearchTree<string, boolean>;
+	private _value?: number;
 
-	private _isVirtualMachineMacAdress(mac: string): boolean {
+	private _isVirtualMachineMacAddress(mac: string): boolean {
 		if (!this._virtualMachineOUIs) {
-			this._virtualMachineOUIs = new TrieMap<boolean>(s => s.split(/[-:]/));
-			// this._virtualMachineOUIs.insert('00-00-00', true);
-			this._virtualMachineOUIs.insert('00-50-56', true);
-			this._virtualMachineOUIs.insert('00-0C-29', true);
-			this._virtualMachineOUIs.insert('00-05-69', true);
-			this._virtualMachineOUIs.insert('00-03-FF', true);
-			this._virtualMachineOUIs.insert('00-1C-42', true);
+			this._virtualMachineOUIs = TernarySearchTree.forStrings<boolean>();
+
+			// dash-separated
+			this._virtualMachineOUIs.set('00-50-56', true);
+			this._virtualMachineOUIs.set('00-0C-29', true);
+			this._virtualMachineOUIs.set('00-05-69', true);
+			this._virtualMachineOUIs.set('00-03-FF', true);
+			this._virtualMachineOUIs.set('00-1C-42', true);
+			this._virtualMachineOUIs.set('00-16-3E', true);
+			this._virtualMachineOUIs.set('08-00-27', true);
+
+			// colon-separated
+			this._virtualMachineOUIs.set('00:50:56', true);
+			this._virtualMachineOUIs.set('00:0C:29', true);
+			this._virtualMachineOUIs.set('00:05:69', true);
+			this._virtualMachineOUIs.set('00:03:FF', true);
+			this._virtualMachineOUIs.set('00:1C:42', true);
+			this._virtualMachineOUIs.set('00:16:3E', true);
+			this._virtualMachineOUIs.set('08:00:27', true);
 		}
-		return this._virtualMachineOUIs.findSubstr(mac);
+		return !!this._virtualMachineOUIs.findSubstr(mac);
 	}
 
 	value(): number {
@@ -45,12 +56,13 @@ export const virtualMachineHint: { value(): number } = new class {
 			let interfaceCount = 0;
 
 			const interfaces = networkInterfaces();
-			for (let name in interfaces) {
-				if (Object.prototype.hasOwnProperty.call(interfaces, name)) {
-					for (const {mac, internal} of interfaces[name]) {
+			for (const name in interfaces) {
+				const networkInterface = interfaces[name];
+				if (networkInterface) {
+					for (const { mac, internal } of networkInterface) {
 						if (!internal) {
 							interfaceCount += 1;
-							if (this._isVirtualMachineMacAdress(mac.toUpperCase())) {
+							if (this._isVirtualMachineMacAddress(mac.toUpperCase())) {
 								vmOui += 1;
 							}
 						}
@@ -66,56 +78,51 @@ export const virtualMachineHint: { value(): number } = new class {
 	}
 };
 
+let machineId: Promise<string>;
+export async function getMachineId(errorLogger: (error: Error) => void): Promise<string> {
+	if (!machineId) {
+		machineId = (async () => {
+			const id = await getMacMachineId(errorLogger);
 
-const mac = new class {
-
-	private _value: string;
-
-	get value(): string {
-		if (this._value === void 0) {
-			this._initValue();
-		}
-		return this._value;
+			return id || uuid.generateUuid(); // fallback, generate a UUID
+		})();
 	}
 
-	private _initValue(): void {
-		this._value = null;
-		const interfaces = networkInterfaces();
-		for (let key in interfaces) {
-			for (const i of interfaces[key]) {
-				if (!i.internal) {
-					this._value = crypto.createHash('sha256').update(i.mac, 'utf8').digest('hex');
-					return;
-				}
-			}
-		}
-		this._value = `missing-${uuid.generateUuid()}`;
+	return machineId;
+}
+
+async function getMacMachineId(errorLogger: (error: Error) => void): Promise<string | undefined> {
+	try {
+		const crypto = await import('crypto');
+		const macAddress = getMac();
+		return crypto.createHash('sha256').update(macAddress, 'utf8').digest('hex');
+	} catch (err) {
+		errorLogger(err);
+		return undefined;
 	}
-};
-
-export function _futureMachineIdExperiment(): string {
-	return mac.value;
 }
 
-let machineId: TPromise<string>;
-export function getMachineId(): TPromise<string> {
-	return machineId || (machineId = getMacMachineId()
-		.then(id => id || uuid.generateUuid())); // fallback, generate a UUID
-}
-
-function getMacMachineId(): TPromise<string> {
-	return new TPromise<string>(resolve => {
+const SQM_KEY: string = 'Software\\Microsoft\\SQMClient';
+export async function getSqmMachineId(errorLogger: (error: Error) => void): Promise<string> {
+	if (isWindows) {
+		const Registry = await import('@vscode/windows-registry');
 		try {
-			getmac.getMac((error, macAddress) => {
-				if (!error) {
-					resolve(crypto.createHash('sha256').update(macAddress, 'utf8').digest('hex'));
-				} else {
-					resolve(undefined);
-				}
-			});
+			return Registry.GetStringRegKey('HKEY_LOCAL_MACHINE', SQM_KEY, 'MachineId') || '';
 		} catch (err) {
-			errors.onUnexpectedError(err);
-			resolve(undefined);
+			errorLogger(err);
+			return '';
 		}
-	});
+	}
+	return '';
+}
+
+export async function getDevDeviceId(errorLogger: (error: Error) => void): Promise<string> {
+	try {
+		const deviceIdPackage = await import('@vscode/deviceid');
+		const id = await deviceIdPackage.getDeviceId();
+		return stripUTF8BOM(id);
+	} catch (err) {
+		errorLogger(err);
+		return uuid.generateUuid();
+	}
 }

@@ -1,30 +1,73 @@
 {
-	"name": "ini",
-	"version": "0.1.0",
-	"publisher": "vscode",
-	"engines": { "vscode": "*" },
-	"contributes": {
-		"languages": [{
-			"id": "ini",
-			"extensions": [ ".ini"],
-			"aliases": [ "Ini", "ini" ],
-			"configuration": "./ini.language-configuration.json"
-		},
-		{
-			"id": "properties",
-			"extensions": [ ".properties", ".gitconfig", ".cfg", ".conf" ],
-			"filenames": [ "config", ".gitattributes", ".gitconfig", "gitconfig", ".editorconfig" ],
-			"aliases": [ "Properties", "properties" ],
-			"configuration": "./properties.language-configuration.json"
-		}],
-		"grammars": [{
-			"language": "ini",
-			"scopeName": "source.properties",
-			"path": "./syntaxes/properties.plist"
-		},{
-			"language": "properties",
-			"scopeName": "source.properties",
-			"path": "./syntaxes/properties.plist"
-		}]
-	}
+  "name": "ini",
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "version": "10.0.0",
+  "private": true,
+  "publisher": "vscode",
+  "license": "MIT",
+  "engines": {
+    "vscode": "*"
+  },
+  "scripts": {
+    "update-grammar": "node ../node_modules/vscode-grammar-updater/bin textmate/ini.tmbundle Syntaxes/Ini.plist ./syntaxes/ini.tmLanguage.json"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "ini",
+        "extensions": [
+          ".ini"
+        ],
+        "aliases": [
+          "Ini",
+          "ini"
+        ],
+        "configuration": "./ini.language-configuration.json"
+      },
+      {
+        "id": "properties",
+        "extensions": [
+          ".conf",
+          ".properties",
+          ".cfg",
+          ".directory",
+          ".gitattributes",
+          ".gitconfig",
+          ".gitmodules",
+          ".editorconfig",
+          ".repo"
+        ],
+        "filenames": [
+          "gitconfig"
+        ],
+        "filenamePatterns": [
+          "**/.config/git/config",
+          "**/.git/config"
+        ],
+        "aliases": [
+          "Properties",
+          "properties"
+        ],
+        "configuration": "./properties.language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ini",
+        "scopeName": "source.ini",
+        "path": "./syntaxes/ini.tmLanguage.json"
+      },
+      {
+        "language": "properties",
+        "scopeName": "source.ini",
+        "path": "./syntaxes/ini.tmLanguage.json"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/vscode.git"
+  }
 }

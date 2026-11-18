@@ -2,26 +2,27 @@
 Name=@@NAME_LONG@@
 Comment=Code Editing. Redefined.
 GenericName=Text Editor
-Exec=/usr/share/@@NAME@@/@@NAME@@ --unity-launch %U
-Icon=@@NAME@@
+Exec=@@EXEC@@ %F
+Icon=@@ICON@@
 Type=Application
-StartupNotify=true
-StartupWMClass=@@NAME_SHORT@@
-Categories=Utility;TextEditor;Development;IDE;
-MimeType=text/plain;inode/directory;
-Actions=new-window;
+StartupNotify=false
+StartupWMClass=@@DESKTOP_NAME@@
+Categories=TextEditor;Development;IDE;
+MimeType=application/x-@@NAME@@-workspace;
+Actions=new-empty-window;
 Keywords=vscode;
 
-[Desktop Action new-window]
-Name=New Window
-Name[de]=Neues Fenster
-Name[es]=Nueva ventana
-Name[fr]=Nouvelle fenêtre
-Name[it]=Nuova finestra
-Name[ja]=新規ウインドウ
-Name[ko]=새 창
-Name[ru]=Новое окно
-Name[zh_CN]=新建窗口
-Name[zh_TW]=開新視窗
-Exec=/usr/share/@@NAME@@/@@NAME@@ --new-window %U
-Icon=@@NAME@@
+[Desktop Action new-empty-window]
+Name=New Empty Window
+Name[cs]=Nové prázdné okno
+Name[de]=Neues leeres Fenster
+Name[es]=Nueva ventana vacía
+Name[fr]=Nouvelle fenêtre vide
+Name[it]=Nuova finestra vuota
+Name[ja]=新しい空のウィンドウ
+Name[ko]=새 빈 창
+Name[ru]=Новое пустое окно
+Name[zh_CN]=新建空窗口
+Name[zh_TW]=開新空視窗
+Exec=@@EXEC@@ --new-window %F
+Icon=@@ICON@@

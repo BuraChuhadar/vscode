@@ -3,105 +3,806 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { through } from 'event-stream';
+import es from 'event-stream';
+import fs from 'fs';
+import cp from 'child_process';
+import glob from 'glob';
+import { gulp, filter, rename, buffer, vinylZip, jsonEditor } from './gulp/facade.ts';
+import path from 'path';
+import crypto from 'crypto';
 import { Stream } from 'stream';
-import assign = require('object-assign');
-import remote = require('gulp-remote-src');
-const flatmap = require('gulp-flatmap');
-const vzip = require('gulp-vinyl-zip');
-const filter = require('gulp-filter');
-const rename = require('gulp-rename');
-const util = require('gulp-util');
-const buffer = require('gulp-buffer');
-const json = require('gulp-json-editor');
+import File from 'vinyl';
+import { createStatsStream } from './stats.ts';
+import * as util2 from './util.ts';
+import fancyLog from 'fancy-log';
+import ansiColors from 'ansi-colors';
+import * as jsoncParser from 'jsonc-parser';
+import { getProductionDependencies } from './dependencies.ts';
+import { type IExtensionDefinition, getExtensionStream } from './builtInExtensions.ts';
+import { fetchUrls, fetchGithub } from './fetch.ts';
+import minimatch from 'minimatch';
+import { createTsgoStream, spawnTsgo } from './tsgo.ts';
+import watcher from './watch/index.ts';
 
-function error(err: any): Stream {
-	const result = through();
-	setTimeout(() => result.emit('error', err));
-	return result;
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+
+const root = path.dirname(path.dirname(import.meta.dirname));
+// const commit = getVersion(root);
+// const sourceMappingURLBase = `https://main.vscode-cdn.net/sourcemaps/${commit}`;
+
+function minifyExtensionResources(input: Stream, patterns: string[] = ['**/*.json', '**/*.code-snippets']): Stream {
+	const jsonFilter = filter(patterns, { restore: true });
+	return input
+		.pipe(jsonFilter)
+		.pipe(buffer())
+		.pipe(es.mapSync((f: File) => {
+			const errors: jsoncParser.ParseError[] = [];
+			const value = jsoncParser.parse(f.contents!.toString('utf8'), errors, { allowTrailingComma: true });
+			if (errors.length === 0) {
+				// file parsed OK => just stringify to drop whitespace and comments
+				f.contents = Buffer.from(JSON.stringify(value));
+			}
+			return f;
+		}))
+		.pipe(jsonFilter.restore);
 }
 
-const baseHeaders = {
-	'X-Market-Client-Id': 'VSCode Build',
-	'User-Agent': 'VSCode Build',
+function updateExtensionPackageJSON(input: Stream, update: (data: any) => any): Stream {
+	const packageJsonFilter = filter('extensions/*/package.json', { restore: true });
+	return input
+		.pipe(packageJsonFilter)
+		.pipe(buffer())
+		.pipe(es.mapSync((f: File) => {
+			const data = JSON.parse(f.contents!.toString('utf8'));
+			f.contents = Buffer.from(JSON.stringify(update(data)));
+			return f;
+		}))
+		.pipe(packageJsonFilter.restore);
+}
+
+/**
+ * The esbuild scripts of the extensions whose build doesn't use `esbuild.mts`, with their arguments.
+ * With `typeCheckAfterBuild`, the type check runs after the script instead of alongside it.
+ */
+const esbuildScriptsByExtension: Record<string, { readonly script: string; readonly args: readonly string[]; readonly typeCheckAfterBuild?: boolean }> = {
+	// Builds the bundles that ship, without the test bundles that would make the integration tests run
+	// the extension tests too. The source maps go to `dist-sourcemaps`, which the product build uploads
+	// (see `build/azure-pipelines/copilot/upload-sourcemaps-steps.yml`). The script ends with Copilot's
+	// postinstall, which deletes and copies again `node_modules/@github/copilot/sdk`, whose declarations
+	// the type check reads.
+	'copilot': { script: '.esbuild.mts', args: ['--sourcemaps', '--shipped-bundles-only'], typeCheckAfterBuild: true },
 };
 
-export function src(extensionName: string, version: string): Stream {
-	const filterType = 7;
-	const value = extensionName;
-	const criterium = { filterType, value };
-	const criteria = [criterium];
-	const pageNumber = 1;
-	const pageSize = 1;
-	const sortBy = 0;
-	const sortOrder = 0;
-	const flags = 0x1 | 0x2 | 0x80;
-	const assetTypes = ['Microsoft.VisualStudio.Services.VSIXPackage'];
-	const filters = [{ criteria, pageNumber, pageSize, sortBy, sortOrder }];
-	const body = JSON.stringify({ filters, assetTypes, flags });
-	const headers: any = assign({}, baseHeaders, {
-		'Content-Type': 'application/json',
-		'Accept': 'application/json;api-version=3.0-preview.1',
-		'Content-Length': body.length
+function fromLocal(extensionPath: string, forWeb: boolean): Stream {
+
+	const esbuildScript = !forWeb ? esbuildScriptsByExtension[path.basename(extensionPath)] : undefined;
+	const esbuildConfigFileName = esbuildScript?.script ?? (forWeb
+		? 'esbuild.browser.mts'
+		: 'esbuild.mts');
+
+	const hasEsbuild = fs.existsSync(path.join(extensionPath, esbuildConfigFileName));
+
+	let input: Stream;
+	let isBundled = false;
+
+	if (hasEsbuild) {
+		const typeCheckRoots = getBuildRootsForExtension(extensionPath);
+		input = esbuildScript?.typeCheckAfterBuild
+			? fromLocalEsbuild(extensionPath, esbuildConfigFileName, esbuildScript.args, () => Promise.all(typeCheckRoots.map(root => typeCheckExtension(root, forWeb))))
+			: es.merge(
+				fromLocalEsbuild(extensionPath, esbuildConfigFileName, esbuildScript?.args ?? []),
+				// Esbuild extensions need a separate type check step
+				...typeCheckRoots.map(root => typeCheckExtensionStream(root, forWeb)),
+			);
+		isBundled = true;
+	} else {
+		input = fromLocalNormal(extensionPath);
+	}
+
+	if (isBundled) {
+		input = updateExtensionPackageJSON(input, (data: any) => {
+			delete data.scripts;
+			delete data.dependencies;
+			delete data.devDependencies;
+			if (data.main) {
+				data.main = data.main.replace('/out/', '/dist/');
+			}
+			return data;
+		});
+	}
+
+	return input;
+}
+
+export function typeCheckExtension(extensionPath: string, forWeb: boolean): Promise<void> {
+	const tsconfigFileName = forWeb ? 'tsconfig.browser.json' : 'tsconfig.json';
+	const tsconfigPath = path.join(extensionPath, tsconfigFileName);
+	return spawnTsgo(tsconfigPath, { taskName: 'typechecking extension (tsgo)', noEmit: true });
+}
+
+export function typeCheckExtensionStream(extensionPath: string, forWeb: boolean): Stream {
+	const tsconfigFileName = forWeb ? 'tsconfig.browser.json' : 'tsconfig.json';
+	const tsconfigPath = path.join(extensionPath, tsconfigFileName);
+	return createTsgoStream(tsconfigPath, { taskName: 'typechecking extension (tsgo)', noEmit: true });
+}
+
+
+/**
+ * A file of a packaged extension: `path` inside the extension and `localPath`, the file on disk
+ * (different for a dependency that pnpm hoisted out of the extension's `node_modules`).
+ */
+interface IExtensionFile {
+	readonly path: string;
+	readonly localPath: string;
+}
+
+function toVinylFiles(extensionPath: string, entries: readonly IExtensionFile[]): File[] {
+	return entries.map(entry => new File({
+		path: path.join(extensionPath, entry.path),
+		stat: fs.statSync(entry.localPath),
+		base: extensionPath,
+		contents: fs.createReadStream(entry.localPath)
+	}));
+}
+
+/**
+ * Finds the folder of an installed package the way Node.js resolves it from `fromFolder`. With
+ * pnpm's hoisted layout a package can be in the folder's own node_modules or in a parent's.
+ */
+function findPackageFolder(fromFolder: string, packageName: string): string {
+	for (let current = path.resolve(fromFolder); ; current = path.dirname(current)) {
+		const candidate = path.join(current, 'node_modules', packageName);
+		if (fs.existsSync(path.join(candidate, 'package.json'))) {
+			return candidate;
+		}
+		if (path.dirname(current) === current) {
+			throw new Error(`Cannot find package ${packageName} from ${fromFolder}`);
+		}
+	}
+}
+
+function fromLocalNormal(extensionPath: string): Stream {
+	const vsce = require('@vscode/vsce') as typeof import('@vscode/vsce');
+	const result = es.through();
+
+	// The extension is packaged as is, without its dependencies: pnpm can hoist them out of the
+	// extension's folder, where vsce doesn't look for them.
+	const packageJson = JSON.parse(fs.readFileSync(path.join(extensionPath, 'package.json'), 'utf8'));
+	const dependencies = [...Object.keys(packageJson.dependencies ?? {}), ...Object.keys(packageJson.optionalDependencies ?? {})];
+	if (dependencies.length > 0) {
+		throw new Error(`Extension ${path.basename(extensionPath)} has production dependencies (${dependencies.join(', ')}) but is packaged without bundling, so they would be missing. Bundle it with esbuild.mts (and esbuild.browser.mts for the web), or package its dependencies explicitly (packagedDependenciesByExtension in build/lib/extensions.ts).`);
+	}
+
+	vsce.listFiles({ cwd: extensionPath, packageManager: vsce.PackageManager.None })
+		.then(fileNames => es.readArray(toVinylFiles(extensionPath, fileNames.map(fileName => ({ path: fileName, localPath: path.join(extensionPath, fileName) })))).pipe(result))
+		.catch(err => result.emit('error', err));
+
+	return result.pipe(createStatsStream(path.basename(extensionPath)));
+}
+
+/**
+ * Returns whether the `.vscodeignore` of an extension packages the file at `filePath` (a path with
+ * `/` separators, relative to the extension folder), like `vsce` does: a file is packaged unless a
+ * pattern ignores it, and a negated pattern (`!`) packages it again. A pattern without a wildcard in
+ * its last segment also matches the files in a folder of that name.
+ */
+export function createVscodeignoreFilter(extensionPath: string): (filePath: string) => boolean {
+	const ignoreFilePath = path.join(extensionPath, '.vscodeignore');
+	const patterns = fs.existsSync(ignoreFilePath)
+		? fs.readFileSync(ignoreFilePath, 'utf8').split(/[\r\n]/).map(line => line.trim()).filter(line => line && !line.startsWith('#'))
+		: [];
+	const allPatterns = [
+		...patterns,
+		...patterns.filter(pattern => !/(^|\/)[^/]*\*[^/]*$/.test(pattern)).map(pattern => pattern.endsWith('/') ? `${pattern}**` : `${pattern}/**`),
+	];
+	const ignored = allPatterns.filter(pattern => !pattern.startsWith('!'));
+	const negated = allPatterns.filter(pattern => pattern.startsWith('!')).map(pattern => pattern.slice(1));
+	const matches = (filePath: string, pattern: string) => minimatch(filePath, pattern, { dot: true });
+	return filePath => !ignored.some(pattern => matches(filePath, pattern)) || negated.some(pattern => matches(filePath, pattern));
+}
+
+function fromLocalEsbuild(extensionPath: string, esbuildConfigFileName: string, esbuildArgs: readonly string[], afterBuild?: () => Promise<unknown>): Stream {
+	const vsce = require('@vscode/vsce') as typeof import('@vscode/vsce');
+	const result = es.through();
+	const extensionName = path.basename(extensionPath);
+
+	// Extensions built with esbuild can still externalize runtime dependencies.
+	// Ensure those externals are included in the packaged built-in extension.
+	const packagedDependenciesByExtension: Record<string, string[]> = {
+		'git': ['@vscode/fs-copyfile'],
+		'copilot': ['@github/copilot', '@vscode/copilot-typescript-server-plugin'],
+	};
+	const packagedDependencies = packagedDependenciesByExtension[extensionName] ?? [];
+
+	const esbuildScript = path.join(extensionPath, esbuildConfigFileName);
+
+	// Run esbuild, then collect the files
+	new Promise<void>((resolve, reject) => {
+		const proc = cp.execFile(process.argv[0], [esbuildScript, ...esbuildArgs], { cwd: extensionPath }, (error, _stdout, stderr) => {
+			if (error) {
+				return reject(error);
+			}
+
+			const matches = (stderr || '').match(/\> (.+): error: (.+)?/g);
+			fancyLog(`Bundled extension: ${ansiColors.yellow(path.join(path.basename(extensionPath), esbuildConfigFileName))} with ${matches ? matches.length : 0} errors.`);
+			for (const match of matches || []) {
+				fancyLog.error(match);
+			}
+			return resolve();
+		});
+
+		proc.stdout!.on('data', (data) => {
+			fancyLog(`${ansiColors.green('esbuilding')}: ${data.toString('utf8')}`);
+		});
+	}).then(() => afterBuild?.()).then(() => {
+		// After esbuild completes, collect all files using vsce
+		return vsce.listFiles({ cwd: extensionPath, packageManager: vsce.PackageManager.None });
+	}).then(fileNames => {
+		const entries = new Map<string, IExtensionFile>(fileNames.map(fileName => [fileName, { path: fileName, localPath: path.join(extensionPath, fileName) }]));
+		// Like `vsce package`, which packages the files of the dependencies that the `.vscodeignore` selects.
+		const isPackaged = createVscodeignoreFilter(extensionPath);
+		for (const dependency of packagedDependencies) {
+			// The package can be hoisted out of the extension's node_modules; it is packaged at
+			// node_modules/<dependency> inside the extension. Only the package's own files are
+			// packaged: its dependencies (e.g. build-time node-addon-api) can be nested in it.
+			const dependencyFolder = findPackageFolder(extensionPath, dependency);
+			for (const localPath of glob.sync(path.join(dependencyFolder, '**'), { nodir: true, dot: true, ignore: path.join(dependencyFolder, 'node_modules', '**') })) {
+				const filePath = path.join('node_modules', dependency, path.relative(dependencyFolder, localPath));
+				// Exclude non-.node files from build directories to avoid timestamp-sensitive
+				// artifacts (e.g. Makefile) that break macOS universal builds due to SHA mismatches.
+				const parts = filePath.split(path.sep);
+				if (parts.indexOf('build') !== -1 && !filePath.endsWith('.node')) {
+					continue;
+				}
+				if (!isPackaged(parts.join('/'))) {
+					continue;
+				}
+				entries.set(filePath, { path: filePath, localPath });
+			}
+		}
+
+		es.readArray(toVinylFiles(extensionPath, [...entries.values()])).pipe(result);
+	}).catch(err => {
+		console.error(extensionPath);
+		console.error(packagedDependencies);
+		result.emit('error', err);
 	});
 
-	const options = {
-		base: 'https://marketplace.visualstudio.com/_apis/public/gallery',
-		requestOptions: {
-			method: 'POST',
-			gzip: true,
-			headers,
-			body: body
+	return result.pipe(createStatsStream(path.basename(extensionPath)));
+}
+
+const userAgent = 'VSCode Build';
+const baseHeaders = {
+	'X-Market-Client-Id': 'VSCode Build',
+	'User-Agent': userAgent,
+	'X-Market-User-Id': '291C1CD0-051A-4123-9B4B-30D60EF52EE2',
+};
+
+export function fromMarketplace(serviceUrl: string, { name: extensionName, version, sha256, metadata }: IExtensionDefinition): Stream {
+	const [publisher, name] = extensionName.split('.');
+	const url = `${serviceUrl}/publishers/${publisher}/vsextensions/${name}/${version}/vspackage`;
+
+	fancyLog('Downloading extension:', ansiColors.yellow(`${extensionName}@${version}`), '...');
+
+	const packageJsonFilter = filter('package.json', { restore: true });
+
+	return fetchUrls('', {
+		base: url,
+		nodeFetchOptions: {
+			headers: baseHeaders
+		},
+		checksumSha256: sha256
+	})
+		.pipe(vinylZip.src())
+		.pipe(filter('extension/**'))
+		.pipe(rename(p => p.dirname = p.dirname!.replace(/^extension\/?/, '')))
+		.pipe(packageJsonFilter)
+		.pipe(buffer())
+		.pipe(jsonEditor({ __metadata: metadata }))
+		.pipe(packageJsonFilter.restore);
+}
+
+export function fromVsix(vsixPath: string, { name: extensionName, version, sha256, metadata }: IExtensionDefinition): Stream {
+	fancyLog('Using local VSIX for extension:', ansiColors.yellow(`${extensionName}@${version}`), '...');
+
+	const packageJsonFilter = filter('package.json', { restore: true });
+
+	return gulp.src(vsixPath)
+		.pipe(buffer())
+		.pipe(es.mapSync((f: File) => {
+			const hash = crypto.createHash('sha256');
+			hash.update(f.contents as Buffer);
+			const checksum = hash.digest('hex');
+			if (checksum !== sha256) {
+				throw new Error(`Checksum mismatch for ${vsixPath} (expected ${sha256}, actual ${checksum}))`);
+			}
+			return f;
+		}))
+		.pipe(vinylZip.src())
+		.pipe(filter('extension/**'))
+		.pipe(rename(p => p.dirname = p.dirname!.replace(/^extension\/?/, '')))
+		.pipe(packageJsonFilter)
+		.pipe(buffer())
+		.pipe(jsonEditor({ __metadata: metadata }))
+		.pipe(packageJsonFilter.restore);
+}
+
+
+export function fromGithub({ name, version, repo, sha256, metadata }: IExtensionDefinition, options?: { asset?: { assetName: string; sha256: string }; latest?: boolean }): Stream {
+	const asset = options?.asset;
+	const latest = options?.latest ?? false;
+	fancyLog('Downloading extension from GH:', ansiColors.yellow(`${name}@${latest ? 'latest' : version}`), asset ? ansiColors.gray(`(${asset.assetName})`) : '', '...');
+	if (latest) {
+		fancyLog(ansiColors.yellow(`Warning: skipping checksum validation for ${name} (downloading latest release, no pinned checksum available)`));
+	}
+
+	const packageJsonFilter = filter('package.json', { restore: true });
+
+	return fetchGithub(new URL(repo).pathname, {
+		version,
+		name: asset ? asset.assetName : name => name.endsWith('.vsix'),
+		// The checksum is tied to a specific version; when resolving the latest release the
+		// downloaded asset differs, so it cannot be validated against the pinned checksum.
+		checksumSha256: latest ? undefined : (asset ? asset.sha256 : sha256),
+		latest
+	})
+		.pipe(buffer())
+		.pipe(vinylZip.src())
+		.pipe(filter('extension/**'))
+		.pipe(rename(p => p.dirname = p.dirname!.replace(/^extension\/?/, '')))
+		.pipe(packageJsonFilter)
+		.pipe(buffer())
+		.pipe(jsonEditor({ __metadata: metadata }))
+		.pipe(packageJsonFilter.restore);
+}
+
+/**
+ * All extensions that are known to have some native component and thus must be built on the
+ * platform that is being built.
+ */
+const nativeExtensions = [
+	'git',
+	'microsoft-authentication',
+];
+
+const excludedExtensions = [
+	'copilot',
+	'vscode-api-tests',
+	'vscode-colorize-tests',
+	'vscode-colorize-perf-tests',
+	'vscode-test-resolver',
+	'ms-vscode.node-debug',
+	'ms-vscode.node-debug2',
+];
+
+const marketplaceWebExtensionsExclude = new Set([
+	'ms-vscode.node-debug',
+	'ms-vscode.node-debug2',
+	'ms-vscode.js-debug-companion',
+	'ms-vscode.js-debug',
+	'ms-vscode.vscode-js-profile-table'
+]);
+
+const productJson = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '../../product.json'), 'utf8'));
+const builtInExtensions: IExtensionDefinition[] = productJson.builtInExtensions || [];
+const webBuiltInExtensions: IExtensionDefinition[] = productJson.webBuiltInExtensions || [];
+
+type ExtensionKind = 'ui' | 'workspace' | 'web';
+interface IExtensionManifest {
+	main?: string;
+	browser?: string;
+	extensionKind?: ExtensionKind | ExtensionKind[];
+	extensionPack?: string[];
+	extensionDependencies?: string[];
+	contributes?: { [id: string]: any };
+}
+/**
+ * Loosely based on `getExtensionKind` from `src/vs/workbench/services/extensions/common/extensionManifestPropertiesService.ts`
+ */
+export function isWebExtension(manifest: IExtensionManifest): boolean {
+	if (Boolean(manifest.browser)) {
+		return true;
+	}
+	if (Boolean(manifest.main)) {
+		return false;
+	}
+	// neither browser nor main
+	if (typeof manifest.extensionKind !== 'undefined') {
+		const extensionKind = Array.isArray(manifest.extensionKind) ? manifest.extensionKind : [manifest.extensionKind];
+		if (extensionKind.indexOf('web') >= 0) {
+			return true;
+		}
+	}
+	if (typeof manifest.contributes !== 'undefined') {
+		for (const id of ['debuggers', 'terminal', 'typescriptServerPlugins']) {
+			if (manifest.contributes.hasOwnProperty(id)) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+/**
+ * Package local extensions that are known to not have native dependencies. Mutually exclusive to {@link packageNativeLocalExtensionsStream}.
+ * @param forWeb build the extensions that have web targets
+ * @returns a stream
+ */
+export function packageNonNativeLocalExtensionsStream(forWeb: boolean): Stream {
+	return doPackageLocalExtensionsStream(forWeb, false);
+}
+
+/**
+ * Package local extensions that are known to have native dependencies. Mutually exclusive to {@link packageNonNativeLocalExtensionsStream}.
+ * @note it's possible that the extension does not have native dependencies for the current platform, especially if building for the web,
+ * but we simplify the logic here by having a flat list of extensions (See {@link nativeExtensions}) that are known to have native
+ * dependencies on some platform and thus should be packaged on the platform that they are building for.
+ * @param forWeb build the extensions that have web targets
+ * @returns a stream
+ */
+export function packageNativeLocalExtensionsStream(forWeb: boolean): Stream {
+	return doPackageLocalExtensionsStream(forWeb, true);
+}
+
+/**
+ * Package all the local extensions... both those that are known to have native dependencies and those that are not.
+ * @param forWeb build the extensions that have web targets
+ * @returns a stream
+ */
+export function packageAllLocalExtensionsStream(forWeb: boolean): Stream {
+	return es.merge([
+		packageNonNativeLocalExtensionsStream(forWeb),
+		packageNativeLocalExtensionsStream(forWeb)
+	]);
+}
+
+/**
+ * @param forWeb build the extensions that have web targets
+ * @param native build the extensions that are marked as having native dependencies
+ */
+function doPackageLocalExtensionsStream(forWeb: boolean, native: boolean): Stream {
+	const nativeExtensionsSet = new Set(nativeExtensions);
+	const localExtensionsDescriptions = (
+		(glob.sync('extensions/*/package.json') as string[])
+			.map(manifestPath => {
+				const absoluteManifestPath = path.join(root, manifestPath);
+				const extensionPath = path.dirname(path.join(root, manifestPath));
+				const extensionName = path.basename(extensionPath);
+				return { name: extensionName, path: extensionPath, manifestPath: absoluteManifestPath };
+			})
+			.filter(({ name }) => native ? nativeExtensionsSet.has(name) : !nativeExtensionsSet.has(name))
+			.filter(({ name }) => excludedExtensions.indexOf(name) === -1)
+			.filter(({ name }) => builtInExtensions.every(b => b.name !== name))
+			.filter(({ manifestPath }) => (forWeb ? isWebExtension(require(manifestPath)) : true))
+	);
+
+	const localExtensionsStream = minifyExtensionResources(
+		es.merge(
+			...localExtensionsDescriptions.map(extension => {
+				return fromLocal(extension.path, forWeb)
+					.pipe(rename(p => p.dirname = `extensions/${extension.name}/${p.dirname}`));
+			})
+		)
+	);
+
+	let result: Stream;
+	if (forWeb) {
+		result = localExtensionsStream;
+	} else {
+		// also include shared production node modules
+		const dependenciesStreams = getSharedExtensionDependencyFolders().map(({ folder, destination }) => getSharedExtensionDependencyStream(folder, destination));
+
+		if (dependenciesStreams.length) {
+			result = es.merge(
+				localExtensionsStream,
+				es.merge(...dependenciesStreams)
+					.pipe(util2.cleanNodeModules(path.join(root, 'build', '.moduleignore')))
+					.pipe(util2.cleanNodeModules(path.join(root, 'build', `.moduleignore.${process.platform}`))));
+		} else {
+			result = localExtensionsStream;
+		}
+	}
+
+	return (
+		result
+			.pipe(util2.setExecutableBit(['**/*.sh']))
+	);
+}
+
+const sharedTypeScriptDestination = 'extensions/node_modules/typescript';
+const unusedTypeScriptLibFiles = new Set([
+	'tsc.js',
+	'_tsc.js',
+	'tsc6.js',
+	'_tsc6.js',
+	'typescriptServices.js',
+	'_typescriptServices.js',
+]);
+
+/**
+ * Whether the built-in extensions need the file at `relativePath` (a path with `/` separators,
+ * relative to the package folder) of the TypeScript that they share. They use only `package.json`
+ * and the files in `lib`, and of those neither the compiler (`tsc`), nor the `typescriptServices`
+ * bundle, nor the type declarations other than the standard library's, `typescript.d.ts` and
+ * `protocol.d.ts`. `.moduleignore` leaves out more of them when the product is packaged.
+ */
+export function isPackagedTypeScriptFile(relativePath: string): boolean {
+	const [first, second, ...rest] = relativePath.split('/');
+	if (relativePath === '' || (first === 'package.json' && second === undefined)) {
+		return true;
+	}
+	if (first !== 'lib') {
+		return false;
+	}
+	if (second === undefined || rest.length > 0) {
+		return true;
+	}
+	if (unusedTypeScriptLibFiles.has(second)) {
+		return false;
+	}
+	return !second.endsWith('.d.ts') || second === 'lib.d.ts' || /^lib\..*\.d\.ts$/.test(second) || second === 'protocol.d.ts' || second === 'typescript.d.ts';
+}
+
+/**
+ * Returns the production dependencies of `extensions/package.json` (shared by the built-in
+ * extensions) with their destination in the build: their folder in the layout of `extensions`
+ * (`extensions/node_modules/...`, see `layoutRoots` in `build/npm/dirs.ts`). `folder` holds the
+ * files of the package (in pnpm's virtual store with the isolated linker).
+ */
+function getSharedExtensionDependencyFolders(): { folder: string; destination: string }[] {
+	const extensionsNodeModules = path.join(root, 'extensions', 'node_modules');
+	const result = new Map<string, string>();
+	for (const { folder, source } of getProductionDependencies('extensions/')) {
+		const relative = path.relative(extensionsNodeModules, folder);
+		if (relative.startsWith('..')) {
+			throw new Error(`Unexpected location of a shared extension dependency: ${folder}`);
+		}
+		const destination = path.posix.join('extensions', 'node_modules', relative.split(path.sep).join('/'));
+		const existing = result.get(destination);
+		if (existing && existing !== source) {
+			throw new Error(`Shared extension dependencies ${existing} and ${source} would both be packaged at ${destination}`);
+		}
+		result.set(destination, source);
+	}
+	return [...result].map(([destination, folder]) => ({ folder: path.relative(root, folder).split(path.sep).join('/'), destination }));
+}
+
+/**
+ * Returns the files of a shared extension dependency, read from `folder` and placed at
+ * `destination`. The files are moved rather than renamed, so that the filters that follow match
+ * their packaged path, and not the folder of the package in pnpm's virtual store (`.pnpm`).
+ */
+export function getSharedExtensionDependencyStream(folder: string, destination: string): Stream {
+	return gulp.src([`${folder}/**`, `!${folder}/**/{test,tests}/**`], { base: folder })
+		.pipe(filter(file => destination !== sharedTypeScriptDestination || isPackagedTypeScriptFile(file.relative.split(path.sep).join('/'))))
+		.pipe(es.mapSync((file: File) => {
+			const relative = file.relative;
+			file.base = file.cwd;
+			file.path = path.join(file.cwd, destination, relative);
+			return file;
+		}));
+}
+
+/**
+ * Packages the built-in Copilot extension like the other local extensions (see
+ * {@link doPackageLocalExtensionsStream}), on its own because the platform Compile jobs build it
+ * after preparing it (see `build/azure-pipelines/copilot/builtin-steps.yml`). Its packaged
+ * dependencies hold the parts of `node_modules` that Copilot loads at runtime, with the native files
+ * of the build machine, which packaging the product replaces with those of the target platform (see
+ * `prepareBuiltInCopilotRipgrepShim` in `copilot.ts`).
+ */
+export function packageCopilotExtensionStream(): Stream {
+	const extensionPath = path.join(root, 'extensions', 'copilot');
+	if (!fs.existsSync(extensionPath)) {
+		return es.readArray([]);
+	}
+
+	return minifyExtensionResources(
+		fromLocal(extensionPath, false)
+			.pipe(rename(p => p.dirname = `extensions/copilot/${p.dirname}`))
+	).pipe(util2.setExecutableBit(['**/*.sh']));
+}
+
+export function packageMarketplaceExtensionsStream(forWeb: boolean): Stream {
+	const marketplaceExtensionsDescriptions = [
+		...builtInExtensions.filter(({ name }) => (forWeb ? !marketplaceWebExtensionsExclude.has(name) : true)),
+		...(forWeb ? webBuiltInExtensions : [])
+	];
+	const marketplaceExtensionsStream = minifyExtensionResources(
+		es.merge(
+			...marketplaceExtensionsDescriptions
+				.map(extension => {
+					const src = getExtensionStream(extension).pipe(rename(p => p.dirname = `extensions/${p.dirname}`));
+					return updateExtensionPackageJSON(src, (data: any) => {
+						delete data.scripts;
+						delete data.dependencies;
+						delete data.devDependencies;
+						return data;
+					});
+				})
+		)
+	);
+
+	return (
+		marketplaceExtensionsStream
+			.pipe(util2.setExecutableBit(['**/*.sh']))
+	);
+}
+
+export interface IScannedBuiltinExtension {
+	readonly extensionPath: string;
+	readonly packageJSON: unknown;
+	readonly packageNLS: unknown | undefined;
+	readonly readmePath: string | undefined;
+	readonly changelogPath: string | undefined;
+}
+
+export function scanBuiltinExtensions(extensionsRoot: string, exclude: string[] = []): IScannedBuiltinExtension[] {
+	const scannedExtensions: IScannedBuiltinExtension[] = [];
+
+	try {
+		const extensionsFolders = fs.readdirSync(extensionsRoot);
+		for (const extensionFolder of extensionsFolders) {
+			if (exclude.indexOf(extensionFolder) >= 0) {
+				continue;
+			}
+			const packageJSONPath = path.join(extensionsRoot, extensionFolder, 'package.json');
+			if (!fs.existsSync(packageJSONPath)) {
+				continue;
+			}
+			const packageJSON = JSON.parse(fs.readFileSync(packageJSONPath).toString('utf8'));
+			if (!isWebExtension(packageJSON)) {
+				continue;
+			}
+			const children = fs.readdirSync(path.join(extensionsRoot, extensionFolder));
+			const packageNLSPath = children.filter(child => child === 'package.nls.json')[0];
+			const packageNLS = packageNLSPath ? JSON.parse(fs.readFileSync(path.join(extensionsRoot, extensionFolder, packageNLSPath)).toString()) : undefined;
+			const readme = children.filter(child => /^readme(\.txt|\.md|)$/i.test(child))[0];
+			const changelog = children.filter(child => /^changelog(\.txt|\.md|)$/i.test(child))[0];
+
+			scannedExtensions.push({
+				extensionPath: extensionFolder,
+				packageJSON,
+				packageNLS,
+				readmePath: readme ? path.join(extensionFolder, readme) : undefined,
+				changelogPath: changelog ? path.join(extensionFolder, changelog) : undefined,
+			});
+		}
+		return scannedExtensions;
+	} catch (ex) {
+		return scannedExtensions;
+	}
+}
+
+export function translatePackageJSON(packageJSON: string, packageNLSPath: string) {
+	interface NLSFormat {
+		[key: string]: string | { message: string; comment: string[] };
+	}
+	const CharCode_PC = '%'.charCodeAt(0);
+	const packageNls: NLSFormat = JSON.parse(fs.readFileSync(packageNLSPath).toString());
+	const translate = (obj: any) => {
+		for (const key in obj) {
+			const val = obj[key];
+			if (Array.isArray(val)) {
+				val.forEach(translate);
+			} else if (val && typeof val === 'object') {
+				translate(val);
+			} else if (typeof val === 'string' && val.charCodeAt(0) === CharCode_PC && val.charCodeAt(val.length - 1) === CharCode_PC) {
+				const translated = packageNls[val.substr(1, val.length - 2)];
+				if (translated) {
+					obj[key] = typeof translated === 'string' ? translated : (typeof translated.message === 'string' ? translated.message : val);
+				}
+			}
 		}
 	};
+	translate(packageJSON);
+	return packageJSON;
+}
 
-	return remote('/extensionquery', options)
-		.pipe(flatmap((stream, f) => {
-			const rawResult = f.contents.toString('utf8');
-			const result = JSON.parse(rawResult);
-			const extension = result.results[0].extensions[0];
-			if (!extension) {
-				return error(`No such extension: ${extension}`);
+const extensionsPath = path.join(root, 'extensions');
+
+export async function esbuildExtensions(taskName: string, isWatch: boolean, scripts: { script: string; outputRoot?: string }[]): Promise<void> {
+	function reporter(stdError: string, script: string) {
+		const matches = (stdError || '').match(/\> (.+): error: (.+)?/g);
+		fancyLog(`Finished ${ansiColors.green(taskName)} ${script} with ${matches ? matches.length : 0} errors.`);
+		for (const match of matches || []) {
+			fancyLog.error(match);
+		}
+	}
+
+	const tasks = scripts.map(({ script, outputRoot }) => {
+		return new Promise<void>((resolve, reject) => {
+			const args = [script];
+			if (isWatch) {
+				args.push('--watch');
 			}
-
-			const metadata = {
-				id: extension.extensionId,
-				publisherId: extension.publisher,
-				publisherDisplayName: extension.publisher.displayName
-			};
-
-			const extensionVersion = extension.versions.filter(v => v.version === version)[0];
-			if (!extensionVersion) {
-				return error(`No such extension version: ${extensionName} @ ${version}`);
+			if (outputRoot) {
+				args.push('--outputRoot', outputRoot);
 			}
-
-			const asset = extensionVersion.files.filter(f => f.assetType === 'Microsoft.VisualStudio.Services.VSIXPackage')[0];
-			if (!asset) {
-				return error(`No VSIX found for extension version: ${extensionName} @ ${version}`);
-			}
-
-			util.log('Downloading extension:', util.colors.yellow(`${extensionName}@${version}`), '...');
-
-			const options = {
-				base: asset.source,
-				requestOptions: {
-					gzip: true,
-					headers: baseHeaders
+			const proc = cp.execFile(process.argv[0], args, {}, (error, _stdout, stderr) => {
+				if (error) {
+					return reject(error);
 				}
-			};
+				reporter(stderr, script);
+				return resolve();
+			});
 
-			return remote('', options)
-				.pipe(flatmap(stream => {
-					const packageJsonFilter = filter('package.json', { restore: true });
+			proc.stdout!.on('data', (data) => {
+				fancyLog(`${ansiColors.green(taskName)}: ${data.toString('utf8')}`);
+			});
+		});
+	});
 
-					return stream
-						.pipe(vzip.src())
-						.pipe(filter('extension/**'))
-						.pipe(rename(p => p.dirname = p.dirname.replace(/^extension\/?/, '')))
-						.pipe(packageJsonFilter)
-						.pipe(buffer())
-						.pipe(json({ __metadata: metadata }))
-						.pipe(packageJsonFilter.restore);
-				}));
-		}));
+	await Promise.all(tasks);
+}
+
+
+// Additional projects to run esbuild on. These typically build code for webviews
+const esbuildMediaScripts: { script: string; tsconfig: string }[] = [
+	{ script: 'ipynb/esbuild.notebook.mts', tsconfig: 'ipynb/notebook-src/tsconfig.json' },
+	{ script: 'markdown-language-features/esbuild.notebook.mts', tsconfig: 'markdown-language-features/notebook/tsconfig.json' },
+	{ script: 'markdown-language-features/esbuild.webview.mts', tsconfig: 'markdown-language-features/preview-src/tsconfig.json' },
+	{ script: 'markdown-language-features/esbuild.markdownEditor.mts', tsconfig: 'markdown-language-features/markdown-editor-src/tsconfig.json' },
+	{ script: 'markdown-math/esbuild.notebook.mts', tsconfig: 'markdown-math/notebook/tsconfig.json' },
+	{ script: 'mermaid-markdown-features/esbuild.webview.mts', tsconfig: 'mermaid-markdown-features/preview-src/tsconfig.json' },
+	{ script: 'notebook-renderers/esbuild.notebook.mts', tsconfig: 'notebook-renderers/tsconfig.json' },
+	{ script: 'simple-browser/esbuild.webview.mts', tsconfig: 'simple-browser/preview-src/tsconfig.json' },
+];
+
+export function buildExtensionMedia(isWatch: boolean, outputRoot?: string): Promise<void> {
+	const esbuildTask = esbuildExtensions('esbuilding extension media', isWatch, esbuildMediaScripts.map(({ script }) => ({
+		script: path.join(extensionsPath, script),
+		outputRoot: outputRoot ? path.join(root, outputRoot, path.dirname(script)) : undefined
+	})));
+
+	const typeCheckTasks = esbuildMediaScripts.map(({ tsconfig }) => {
+		const tsconfigPath = path.join(extensionsPath, tsconfig);
+		const config = { taskName: 'typechecking extension media (tsgo)', noEmit: true };
+		if (!isWatch) {
+			return spawnTsgo(tsconfigPath, config);
+		} else {
+			return watchTypeCheckExtensionMedia(tsconfigPath, config);
+		}
+	});
+
+	return Promise.all([esbuildTask, ...typeCheckTasks]).then(() => undefined);
+}
+
+function watchTypeCheckExtensionMedia(tsconfigPath: string, config: { taskName: string; noEmit?: boolean }): Promise<void> {
+	const srcDir = path.dirname(tsconfigPath);
+	const watchInput = watcher([
+		path.join(srcDir, '**', '*.{ts,tsx,d.ts}'),
+		tsconfigPath,
+		'!' + path.join(srcDir, '**', 'node_modules', '**'),
+		'!' + path.join(srcDir, '**', 'out', '**'),
+		'!' + path.join(srcDir, '**', 'dist', '**'),
+	], { cwd: root, base: srcDir, dot: true, readDelay: 200 });
+	const stream = watchInput
+		.pipe(util2.debounce(() => {
+			const tsgoStream = createTsgoStream(tsconfigPath, config);
+			// Always emit 'end' (even on tsgo error) so the debounce resets to idle
+			// and can process future file changes. Errors are already logged by
+			// spawnTsgo's runReporter, so swallowing the stream error is safe.
+			const result = es.through();
+			tsgoStream.on('end', () => result.emit('end'));
+			tsgoStream.on('error', () => result.emit('end'));
+			return result;
+		}, 200));
+
+	return new Promise<void>((_resolve, reject) => {
+		stream.on('error', reject);
+	});
+}
+
+export function getBuildRootsForExtension(extensionPath: string): string[] {
+	// These extensions split their code between a client and server folder. We should treat each as build roots
+	if (extensionPath.endsWith('css-language-features') || extensionPath.endsWith('html-language-features') || extensionPath.endsWith('json-language-features')) {
+		return [
+			path.join(extensionPath, 'client'),
+			path.join(extensionPath, 'server'),
+		];
+	}
+
+	return [extensionPath];
 }

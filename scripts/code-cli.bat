@@ -3,38 +3,43 @@ setlocal
 
 title VSCode Dev
 
-pushd %~dp0\..
+pushd %~dp0..
 
-:: Node modules
-if not exist node_modules call .\scripts\npm.bat install
+:: Get electron, compile, built-in extensions
+if "%VSCODE_SKIP_PRELAUNCH%"=="" node build/lib/preLaunch.ts
 
-for /f "tokens=2 delims=:," %%a in ('findstr /R /C:"\"nameShort\":.*" product.json') do set NAMESHORT=%%~a
+set "NAMESHORT="
+for /f "tokens=2 delims=:," %%a in ('findstr /R /C:"\"nameShort\":.*" product.json') do if not defined NAMESHORT set "NAMESHORT=%%~a"
 set NAMESHORT=%NAMESHORT: "=%
 set NAMESHORT=%NAMESHORT:"=%.exe
 set CODE=".build\electron\%NAMESHORT%"
 
-for /f "tokens=2 delims=:," %%a in ('findstr /R /C:"\"electronVersion\":.*" package.json') do set DESIREDVERSION=%%~a
-set DESIREDVERSION=%DESIREDVERSION: "=%
-set DESIREDVERSION=v%DESIREDVERSION:"=%
-if exist .\.build\electron\version (set /p INSTALLEDVERSION=<.\.build\electron\version) else (set INSTALLEDVERSION="")
-
-:: Get electron
-if not exist %CODE% node .\node_modules\gulp\bin\gulp.js electron
-if not "%INSTALLEDVERSION%" == "%DESIREDVERSION%" node .\node_modules\gulp\bin\gulp.js electron
-
-:: Build
-if not exist out node .\node_modules\gulp\bin\gulp.js compile
+:: Manage built-in extensions
+if "%~1"=="--builtin" goto builtin
 
 :: Configuration
 set ELECTRON_RUN_AS_NODE=1
 set NODE_ENV=development
 set VSCODE_DEV=1
-set ELECTRON_DEFAULT_ERROR_MODE=1
 set ELECTRON_ENABLE_LOGGING=1
 set ELECTRON_ENABLE_STACK_DUMPING=1
 
+set DISABLE_TEST_EXTENSION="--disable-extension=vscode.vscode-api-tests"
+for %%A in (%*) do (
+	if "%%~A"=="--extensionTestsPath" (
+		set DISABLE_TEST_EXTENSION=""
+	)
+)
+
 :: Launch Code
-%CODE% --debug=5874 out\cli.js . %*
+%CODE% --inspect=5874 out\cli.js %~dp0.. %DISABLE_TEST_EXTENSION% %*
+goto end
+
+:builtin
+%CODE% build/builtin
+
+:end
+
 popd
 
 endlocal

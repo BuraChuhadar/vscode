@@ -3,47 +3,89 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
+import { Emitter } from '../../../../base/common/event.js';
+import { TernarySearchTree } from '../../../../base/common/ternarySearchTree.js';
+import { URI } from '../../../../base/common/uri.js';
+import { getConfigurationValue, IConfigurationChangeEvent, IConfigurationOverrides, IConfigurationService, IConfigurationValue, isConfigurationOverrides } from '../../common/configuration.js';
+import { Extensions, IConfigurationRegistry } from '../../common/configurationRegistry.js';
+import { Registry } from '../../../registry/common/platform.js';
 
-import { TPromise } from 'vs/base/common/winjs.base';
-import { EventEmitter } from 'vs/base/common/eventEmitter';
-import { getConfigurationKeys } from 'vs/platform/configuration/common/model';
-import { IConfigurationService, getConfigurationValue, IConfigurationValue, IConfigurationKeys } from 'vs/platform/configuration/common/configuration';
+export class TestConfigurationService implements IConfigurationService {
+	public _serviceBrand: undefined;
 
-export class TestConfigurationService extends EventEmitter implements IConfigurationService {
-	public _serviceBrand: any;
+	private configuration: Record<string, unknown>;
+	readonly onDidChangeConfigurationEmitter = new Emitter<IConfigurationChangeEvent>();
+	readonly onDidChangeConfiguration = this.onDidChangeConfigurationEmitter.event;
 
-	private configuration = Object.create(null);
-
-	public reloadConfiguration<T>(section?: string): TPromise<T> {
-		return TPromise.as(this.getConfiguration());
+	constructor(configuration?: Record<string, unknown>) {
+		this.configuration = configuration || Object.create(null);
 	}
 
-	public getConfiguration(): any {
-		return this.configuration;
+	private configurationByRoot: TernarySearchTree<string, Record<string, unknown>> = TernarySearchTree.forPaths<Record<string, unknown>>();
+
+	public reloadConfiguration<T>(): Promise<T> {
+		return Promise.resolve(this.getValue() as T);
 	}
 
-	public setUserConfiguration(key: any, value: any): Thenable<void> {
-		this.configuration[key] = value;
-		return TPromise.as(null);
+	public getValue<T>(arg1?: string | IConfigurationOverrides, arg2?: IConfigurationOverrides): T | undefined {
+		let configuration;
+		const overrides = isConfigurationOverrides(arg1) ? arg1 : isConfigurationOverrides(arg2) ? arg2 : undefined;
+		if (overrides) {
+			if (overrides.resource) {
+				configuration = this.configurationByRoot.findSubstr(overrides.resource.fsPath);
+			}
+		}
+		configuration = configuration ? configuration : this.configuration;
+		if (arg1 && typeof arg1 === 'string') {
+			return (configuration[arg1] ?? getConfigurationValue(configuration, arg1)) as T;
+		}
+		return configuration as T;
 	}
 
-	public onDidUpdateConfiguration() {
-		return { dispose() { } };
+	public updateValue(key: string, value: unknown): Promise<void> {
+		return Promise.resolve(undefined);
 	}
 
-	public lookup<C>(key: string): IConfigurationValue<C> {
+	public setUserConfiguration(key: string, value: unknown, root?: URI): Promise<void> {
+		if (root) {
+			const configForRoot = this.configurationByRoot.get(root.fsPath) || Object.create(null);
+			configForRoot[key] = value;
+			this.configurationByRoot.set(root.fsPath, configForRoot);
+		} else {
+			this.configuration[key] = value;
+		}
+
+		return Promise.resolve(undefined);
+	}
+
+	private overrideIdentifiers: Map<string, string[]> = new Map();
+	public setOverrideIdentifiers(key: string, identifiers: string[]): void {
+		this.overrideIdentifiers.set(key, identifiers);
+	}
+
+	public inspect<T>(key: string, overrides?: IConfigurationOverrides): IConfigurationValue<T> {
+		const value = this.getValue(key, overrides) as T;
+
 		return {
-			value: getConfigurationValue<C>(this.getConfiguration(), key),
-			default: getConfigurationValue<C>(this.getConfiguration(), key),
-			user: getConfigurationValue<C>(this.getConfiguration(), key)
+			value,
+			defaultValue: undefined,
+			userValue: value,
+			userLocalValue: value,
+			overrideIdentifiers: this.overrideIdentifiers.get(key)
 		};
 	}
 
-	public keys(): IConfigurationKeys {
+	public keys() {
 		return {
-			default: getConfigurationKeys(),
-			user: Object.keys(this.configuration)
+			default: Object.keys(Registry.as<IConfigurationRegistry>(Extensions.Configuration).getConfigurationProperties()),
+			policy: [],
+			user: Object.keys(this.configuration),
+			workspace: [],
+			workspaceFolder: []
 		};
+	}
+
+	public getConfigurationData() {
+		return null;
 	}
 }

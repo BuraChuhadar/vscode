@@ -3,34 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
+import './editor.all.js';
+import './standalone/browser/iPadShowKeyboard/iPadShowKeyboard.js';
+import './standalone/browser/inspectTokens/inspectTokens.js';
+import './standalone/browser/quickAccess/standaloneHelpQuickAccess.js';
+import './standalone/browser/quickAccess/standaloneGotoLineQuickAccess.js';
+import './standalone/browser/quickAccess/standaloneGotoSymbolQuickAccess.js';
+import './standalone/browser/quickAccess/standaloneCommandsQuickAccess.js';
+import './standalone/browser/referenceSearch/standaloneReferenceSearch.js';
+import './standalone/browser/toggleHighContrast/toggleHighContrast.js';
 
-import 'vs/editor/browser/editor.all';
-import 'vs/editor/contrib/quickOpen/browser/quickOutline';
-import 'vs/editor/contrib/quickOpen/browser/gotoLine';
-import 'vs/editor/contrib/quickOpen/browser/quickCommand';
-import 'vs/editor/contrib/inspectTokens/browser/inspectTokens';
-
-import { createMonacoBaseAPI } from 'vs/editor/common/standalone/standaloneBase';
-import { createMonacoEditorAPI } from 'vs/editor/browser/standalone/standaloneEditor';
-import { createMonacoLanguagesAPI } from 'vs/editor/browser/standalone/standaloneLanguages';
-import { DefaultConfig } from 'vs/editor/common/config/defaultConfig';
-
-// Set defaults for standalone editor
-DefaultConfig.editor.wrappingIndent = 'none';
-DefaultConfig.editor.folding = false;
-DefaultConfig.editor.glyphMargin = false;
-
-var global: any = self;
-global.monaco = createMonacoBaseAPI();
-global.monaco.editor = createMonacoEditorAPI();
-global.monaco.languages = createMonacoLanguagesAPI();
-
-if (typeof global.require !== 'undefined' && typeof global.require.config === 'function') {
-	global.require.config({
-		ignoreDuplicateModules: [
-			'vscode-languageserver-types',
-			'vscode-languageserver-types/main',
-		]
-	});
-}
+export * from './editor.api.js';

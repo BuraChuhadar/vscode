@@ -2,196 +2,220 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import { TPromise } from 'vs/base/common/winjs.base';
-import nls = require('vs/nls');
-import types = require('vs/base/common/types');
-import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
-import { IEditorOptions } from 'vs/editor/common/editorCommon';
-import { TextEditorOptions, EditorModel, EditorInput, EditorOptions } from 'vs/workbench/common/editor';
-import { BaseTextEditorModel } from 'vs/workbench/common/editor/textEditorModel';
-import { UntitledEditorInput } from 'vs/workbench/common/editor/untitledEditorInput';
-import { BaseTextEditor } from 'vs/workbench/browser/parts/editor/textEditor';
-import URI from 'vs/base/common/uri';
-import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
-import { IStorageService } from 'vs/platform/storage/common/storage';
-import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
-import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
-import { IWorkbenchThemeService } from 'vs/workbench/services/themes/common/workbenchThemeService';
-import { IUntitledEditorService } from 'vs/workbench/services/untitled/common/untitledEditorService';
-import { IEditorGroupService } from 'vs/workbench/services/group/common/groupService';
-import { IModeService } from 'vs/editor/common/services/modeService';
-import { ITextFileService } from 'vs/workbench/services/textfile/common/textfiles';
+import { assertReturnsDefined } from '../../../../base/common/types.js';
+import { ICodeEditor, IPasteEvent } from '../../../../editor/browser/editorBrowser.js';
+import { IEditorOpenContext, isTextEditorViewState } from '../../../common/editor.js';
+import { EditorInput } from '../../../common/editor/editorInput.js';
+import { applyTextEditorOptions } from '../../../common/editor/editorOptions.js';
+import { AbstractTextResourceEditorInput, TextResourceEditorInput } from '../../../common/editor/textResourceEditorInput.js';
+import { BaseTextEditorModel } from '../../../common/editor/textEditorModel.js';
+import { UntitledTextEditorInput } from '../../../services/untitled/common/untitledTextEditorInput.js';
+import { AbstractTextCodeEditor } from './textCodeEditor.js';
+import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
+import { IStorageService } from '../../../../platform/storage/common/storage.js';
+import { ITextResourceConfigurationService } from '../../../../editor/common/services/textResourceConfiguration.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { IThemeService } from '../../../../platform/theme/common/themeService.js';
+import { ScrollType, ICodeEditorViewState } from '../../../../editor/common/editorCommon.js';
+import { IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
+import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { IModelService } from '../../../../editor/common/services/model.js';
+import { ILanguageService } from '../../../../editor/common/languages/language.js';
+import { PLAINTEXT_LANGUAGE_ID } from '../../../../editor/common/languages/modesRegistry.js';
+import { EditorOption, IEditorOptions as ICodeEditorOptions } from '../../../../editor/common/config/editorOptions.js';
+import { ModelConstants } from '../../../../editor/common/model.js';
+import { ITextEditorOptions } from '../../../../platform/editor/common/editor.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
 
 /**
  * An editor implementation that is capable of showing the contents of resource inputs. Uses
  * the TextEditor widget to show the contents.
  */
-export class TextResourceEditor extends BaseTextEditor {
-
-	public static ID = 'workbench.editors.textResourceEditor';
+export abstract class AbstractTextResourceEditor extends AbstractTextCodeEditor<ICodeEditorViewState> {
 
 	constructor(
+		id: string,
+		group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IStorageService storageService: IStorageService,
-		@IConfigurationService configurationService: IConfigurationService,
-		@IWorkbenchThemeService themeService: IWorkbenchThemeService,
-		@IUntitledEditorService private untitledEditorService: IUntitledEditorService,
-		@IEditorGroupService editorGroupService: IEditorGroupService,
-		@IModeService modeService: IModeService,
-		@ITextFileService textFileService: ITextFileService
+		@ITextResourceConfigurationService textResourceConfigurationService: ITextResourceConfigurationService,
+		@IThemeService themeService: IThemeService,
+		@IEditorGroupsService editorGroupService: IEditorGroupsService,
+		@IEditorService editorService: IEditorService,
+		@IFileService fileService: IFileService
 	) {
-		super(TextResourceEditor.ID, telemetryService, instantiationService, storageService, configurationService, themeService, modeService, textFileService, editorGroupService);
-
-		this.toUnbind.push(this.untitledEditorService.onDidChangeDirty(e => this.onUntitledDirtyChange(e)));
+		super(id, group, telemetryService, instantiationService, storageService, textResourceConfigurationService, themeService, editorService, editorGroupService, fileService);
 	}
 
-	private onUntitledDirtyChange(resource: URI): void {
-		if (!this.untitledEditorService.isDirty(resource)) {
-			this.clearTextEditorViewState([resource.toString()]); // untitled file got reverted, so remove view state
-		}
-	}
+	override async setInput(input: AbstractTextResourceEditorInput, options: ITextEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 
-	public getTitle(): string {
-		if (this.input) {
-			return this.input.getName();
-		}
+		// Set input and resolve
+		await super.setInput(input, options, context, token);
+		const resolvedModel = await input.resolve();
 
-		return nls.localize('textEditor', "Text Editor");
-	}
-
-	public setInput(input: EditorInput, options?: EditorOptions): TPromise<void> {
-		const oldInput = this.input;
-		super.setInput(input, options);
-
-		// Detect options
-		const forceOpen = options && options.forceOpen;
-
-		// Same Input
-		if (!forceOpen && input.matches(oldInput)) {
-
-			// TextOptions (avoiding instanceof here for a reason, do not change!)
-			const textOptions = <TextEditorOptions>options;
-			if (textOptions && types.isFunction(textOptions.apply)) {
-				textOptions.apply(this.getControl());
-			}
-
-			return TPromise.as<void>(null);
-		}
-
-		// Remember view settings if input changes
-		this.saveTextEditorViewState(oldInput);
-
-		// Different Input (Reload)
-		return input.resolve(true).then((resolvedModel: EditorModel) => {
-
-			// Assert Model instance
-			if (!(resolvedModel instanceof BaseTextEditorModel)) {
-				return TPromise.wrapError<void>('Unable to open file as text');
-			}
-
-			// Assert that the current input is still the one we expect. This prevents a race condition when loading takes long and another input was set meanwhile
-			if (!this.input || this.input !== input) {
-				return null;
-			}
-
-			// Set Editor Model
-			const textEditor = this.getControl();
-			const textEditorModel = resolvedModel.textEditorModel;
-			textEditor.setModel(textEditorModel);
-
-			// Apply Options from TextOptions
-			let optionsGotApplied = false;
-			const textOptions = <TextEditorOptions>options;
-			if (textOptions && types.isFunction(textOptions.apply)) {
-				optionsGotApplied = textOptions.apply(textEditor);
-			}
-
-			// Otherwise restore View State
-			if (!optionsGotApplied) {
-				this.restoreViewState(input);
-			}
+		// Check for cancellation
+		if (token.isCancellationRequested) {
 			return undefined;
-		});
-	}
+		}
 
-	protected restoreViewState(input: EditorInput) {
-		if (input instanceof UntitledEditorInput) {
-			const viewState = this.loadTextEditorViewState(input.getResource().toString());
-			if (viewState) {
-				this.getControl().restoreViewState(viewState);
+		// Assert Model instance
+		if (!(resolvedModel instanceof BaseTextEditorModel)) {
+			throw new Error('Unable to open file as text');
+		}
+
+		// Set Editor Model
+		const control = assertReturnsDefined(this.editorControl);
+		const textEditorModel = resolvedModel.textEditorModel;
+		control.setModel(textEditorModel);
+
+		// Restore view state (unless provided by options)
+		if (!isTextEditorViewState(options?.viewState)) {
+			const editorViewState = this.loadEditorViewState(input, context);
+			if (editorViewState) {
+				if (options?.selection) {
+					editorViewState.cursorState = []; // prevent duplicate selections via options
+				}
+
+				control.restoreViewState(editorViewState);
 			}
 		}
-	}
 
-	protected getConfigurationOverrides(): IEditorOptions {
-		const options = super.getConfigurationOverrides();
-
-		options.readOnly = !(this.input instanceof UntitledEditorInput); // all resource editors are readonly except for the untitled one;
-
-		return options;
-	}
-
-	protected getAriaLabel(): string {
-		const input = this.input;
-		const isReadonly = !(this.input instanceof UntitledEditorInput);
-
-		let ariaLabel: string;
-		const inputName = input && input.getName();
-		if (isReadonly) {
-			ariaLabel = inputName ? nls.localize('readonlyEditorWithInputAriaLabel', "{0}. Readonly text editor.", inputName) : nls.localize('readonlyEditorAriaLabel', "Readonly text editor.");
-		} else {
-			ariaLabel = inputName ? nls.localize('untitledFileEditorWithInputAriaLabel', "{0}. Untitled file text editor.", inputName) : nls.localize('untitledFileEditorAriaLabel', "Untitled file text editor.");
+		// Apply options to editor if any
+		if (options) {
+			applyTextEditorOptions(options, control, ScrollType.Immediate);
 		}
 
-		return ariaLabel;
+		// Since the resolved model provides information about being readonly
+		// or not, we apply it here to the editor even though the editor input
+		// was already asked for being readonly or not. The rationale is that
+		// a resolved model might have more specific information about being
+		// readonly or not that the input did not have.
+		control.updateOptions(this.getReadonlyConfiguration(resolvedModel.isReadonly()));
 	}
 
 	/**
 	 * Reveals the last line of this editor if it has a model set.
-	 * If smart reveal is true will only reveal the last line if the line before last is visible #3351
 	 */
-	public revealLastLine(): void {
-		const codeEditor = <ICodeEditor>this.getControl();
-		const model = codeEditor.getModel();
+	revealLastLine(): void {
+		const control = this.editorControl;
+		if (!control) {
+			return;
+		}
+
+		const model = control.getModel();
 
 		if (model) {
 			const lastLine = model.getLineCount();
-			codeEditor.revealLine(lastLine);
+			control.revealPosition({ lineNumber: lastLine, column: model.getLineMaxColumn(lastLine) }, ScrollType.Smooth);
 		}
 	}
 
-	public clearInput(): void {
-
-		// Keep editor view state in settings to restore when coming back
-		this.saveTextEditorViewState(this.input);
+	override clearInput(): void {
+		super.clearInput();
 
 		// Clear Model
-		this.getControl().setModel(null);
-
-		super.clearInput();
+		this.editorControl?.setModel(null);
 	}
 
-	public shutdown(): void {
+	protected override tracksEditorViewState(input: EditorInput): boolean {
+		// editor view state persistence is only enabled for untitled and resource inputs
+		return input instanceof UntitledTextEditorInput || input instanceof TextResourceEditorInput;
+	}
+}
 
-		// Save View State
-		this.saveTextEditorViewState(this.input);
+export class TextResourceEditor extends AbstractTextResourceEditor {
 
-		// Call Super
-		super.shutdown();
+	static readonly ID = 'workbench.editors.textResourceEditor';
+
+	constructor(
+		group: IEditorGroup,
+		@ITelemetryService telemetryService: ITelemetryService,
+		@IInstantiationService instantiationService: IInstantiationService,
+		@IStorageService storageService: IStorageService,
+		@ITextResourceConfigurationService textResourceConfigurationService: ITextResourceConfigurationService,
+		@IThemeService themeService: IThemeService,
+		@IEditorService editorService: IEditorService,
+		@IEditorGroupsService editorGroupService: IEditorGroupsService,
+		@IModelService private readonly modelService: IModelService,
+		@ILanguageService private readonly languageService: ILanguageService,
+		@IFileService fileService: IFileService
+	) {
+		super(TextResourceEditor.ID, group, telemetryService, instantiationService, storageService, textResourceConfigurationService, themeService, editorGroupService, editorService, fileService);
 	}
 
-	protected saveTextEditorViewState(input: EditorInput): void;
-	protected saveTextEditorViewState(key: string): void;
-	protected saveTextEditorViewState(arg1: EditorInput | string): void {
-		if (typeof arg1 === 'string') {
-			return super.saveTextEditorViewState(arg1);
+	protected override createEditorControl(parent: HTMLElement, configuration: ICodeEditorOptions): void {
+		super.createEditorControl(parent, configuration);
+
+		// Install a listener for paste to update this editors
+		// language if the paste includes a specific language
+		const control = this.editorControl;
+		if (control) {
+			this._register(control.onDidPaste(e => this.onDidEditorPaste(e, control)));
+		}
+	}
+
+	private onDidEditorPaste(e: IPasteEvent, codeEditor: ICodeEditor): void {
+		if (this.input instanceof UntitledTextEditorInput && this.input.hasLanguageSetExplicitly) {
+			return; // do not override language if it was set explicitly
 		}
 
-		if (arg1 instanceof UntitledEditorInput && !arg1.isDisposed()) {
-			return super.saveTextEditorViewState(arg1.getResource().toString());
+		if (e.range.startLineNumber !== 1 || e.range.startColumn !== 1) {
+			return; // document had existing content before the pasted text, don't override.
+		}
+
+		if (codeEditor.getOption(EditorOption.readOnly)) {
+			return; // not for readonly editors
+		}
+
+		const textModel = codeEditor.getModel();
+		if (!textModel) {
+			return; // require a live model
+		}
+
+		const pasteIsWholeContents = textModel.getLineCount() === e.range.endLineNumber && textModel.getLineMaxColumn(e.range.endLineNumber) === e.range.endColumn;
+		if (!pasteIsWholeContents) {
+			return; // document had existing content after the pasted text, don't override.
+		}
+
+		const currentLanguageId = textModel.getLanguageId();
+		if (currentLanguageId !== PLAINTEXT_LANGUAGE_ID) {
+			return; // require current languageId to be unspecific
+		}
+
+		let candidateLanguage: { id: string; source: 'event' | 'guess' } | undefined = undefined;
+
+		// A languageId is provided via the paste event so text was copied using
+		// VSCode. As such we trust this languageId and use it if specific
+		if (e.languageId) {
+			candidateLanguage = { id: e.languageId, source: 'event' };
+		}
+
+		// A languageId was not provided, so the data comes from outside VSCode
+		// We can still try to guess a good languageId from the first line if
+		// the paste changed the first line
+		else {
+			const guess = this.languageService.guessLanguageIdByFilepathOrFirstLine(textModel.uri, textModel.getLineContent(1).substr(0, ModelConstants.FIRST_LINE_DETECTION_LENGTH_LIMIT)) ?? undefined;
+			if (guess) {
+				candidateLanguage = { id: guess, source: 'guess' };
+			}
+		}
+
+		// Finally apply languageId to model if specified
+		if (candidateLanguage && candidateLanguage.id !== PLAINTEXT_LANGUAGE_ID) {
+			if (this.input instanceof UntitledTextEditorInput && candidateLanguage.source === 'event') {
+				// High confidence, set language id at TextEditorModel level to block future auto-detection
+				this.input.setLanguageId(candidateLanguage.id);
+			} else {
+				textModel.setLanguage(this.languageService.createById(candidateLanguage.id));
+			}
+
+			const opts = this.modelService.getCreationOptions(textModel.getLanguageId(), textModel.uri, textModel.isForSimpleWidget);
+			if (opts.detectIndentation) {
+				textModel.detectIndentation(opts.insertSpaces, opts.tabSize);
+			}
 		}
 	}
 }

@@ -1,27 +1,13 @@
-// Type definitions for gulp-sourcemaps
-// Project: https://github.com/floridoo/gulp-sourcemaps
-// Definitions by: Asana <https://asana.com>
-// Definitions: https://github.com/DefinitelyTyped/DefinitelyTyped
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 
-declare module "gulp-sourcemaps" {
-    interface InitOptions {
-        loadMaps?: boolean;
-        debug?: boolean;
-    }
+import type File from 'vinyl';
+import 'gulp-sourcemaps';
 
-    interface WriteMapper {
-        (file: string): string;
-    }
-
-    interface WriteOptions {
-        addComment?: boolean;
-        includeContent?: boolean;
-        sourceRoot?: string | WriteMapper;
-        sourceMappingURLPrefix?: string | WriteMapper;
-        sourceMappingURL?: (f:{relative:string})=>string;
-    }
-
-    export function init(opts?: InitOptions): NodeJS.ReadWriteStream;
-    export function write(path?: string, opts?: WriteOptions): NodeJS.ReadWriteStream;
-    export function write(opts?: WriteOptions): NodeJS.ReadWriteStream;
+declare module 'gulp-sourcemaps' {
+	interface WriteOptions {
+		sourceMappingURL?: (file: File) => string;
+	}
 }

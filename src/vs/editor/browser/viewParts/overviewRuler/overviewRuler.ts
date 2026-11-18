@@ -2,74 +2,171 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import { OverviewRulerPosition, OverviewRulerZone } from 'vs/editor/common/editorCommon';
-import { ViewEventHandler } from 'vs/editor/common/viewModel/viewEventHandler';
-import { IOverviewRuler } from 'vs/editor/browser/editorBrowser';
-import { OverviewRulerImpl } from 'vs/editor/browser/viewParts/overviewRuler/overviewRulerImpl';
-import { ViewContext } from 'vs/editor/common/view/viewContext';
-import * as viewEvents from 'vs/editor/common/view/viewEvents';
+import { FastDomNode, createFastDomNode } from '../../../../base/browser/fastDomNode.js';
+import { IOverviewRuler } from '../../editorBrowser.js';
+import { OverviewRulerPosition, EditorOption } from '../../../common/config/editorOptions.js';
+import { ColorZone, OverviewRulerZone, OverviewZoneManager } from '../../../common/viewModel/overviewZoneManager.js';
+import { ViewContext } from '../../../common/viewModel/viewContext.js';
+import * as viewEvents from '../../../common/viewEvents.js';
+import { ViewEventHandler } from '../../../common/viewEventHandler.js';
 
+/**
+ * The overview ruler appears underneath the editor scroll bar and shows things
+ * like the cursor, various decorations, etc.
+ */
 export class OverviewRuler extends ViewEventHandler implements IOverviewRuler {
 
-	private _context: ViewContext;
-	private _overviewRuler: OverviewRulerImpl;
+	private readonly _context: ViewContext;
+	private readonly _domNode: FastDomNode<HTMLCanvasElement>;
+	private readonly _zoneManager: OverviewZoneManager;
 
-	constructor(context: ViewContext, cssClassName: string, scrollHeight: number, minimumHeight: number, maximumHeight: number, getVerticalOffsetForLine: (lineNumber: number) => number) {
+	constructor(context: ViewContext, cssClassName: string) {
 		super();
 		this._context = context;
-		this._overviewRuler = new OverviewRulerImpl(0, cssClassName, scrollHeight, this._context.configuration.editor.lineHeight,
-			this._context.configuration.editor.viewInfo.canUseTranslate3d, minimumHeight, maximumHeight, getVerticalOffsetForLine);
+		const options = this._context.configuration.options;
+
+		this._domNode = createFastDomNode(document.createElement('canvas'));
+		this._domNode.setClassName(cssClassName);
+		this._domNode.setPosition('absolute');
+		this._domNode.setLayerHinting(true);
+		this._domNode.setContain('strict');
+
+		this._zoneManager = new OverviewZoneManager((lineNumber: number) => this._context.viewLayout.getVerticalOffsetForLineNumber(lineNumber));
+		this._zoneManager.setDOMWidth(0);
+		this._zoneManager.setDOMHeight(0);
+		this._zoneManager.setOuterHeight(this._context.viewLayout.getScrollHeight());
+		this._zoneManager.setLineHeight(options.get(EditorOption.lineHeight));
+
+		this._zoneManager.setPixelRatio(options.get(EditorOption.pixelRatio));
 
 		this._context.addEventHandler(this);
 	}
 
-	public dispose(): void {
+	public override dispose(): void {
 		this._context.removeEventHandler(this);
-		this._overviewRuler.dispose();
+		super.dispose();
 	}
 
 	// ---- begin view event handlers
 
-	public onConfigurationChanged(e: viewEvents.ViewConfigurationChangedEvent): boolean {
-		if (e.lineHeight) {
-			this._overviewRuler.setLineHeight(this._context.configuration.editor.lineHeight, true);
-			return true;
+	public override onConfigurationChanged(e: viewEvents.ViewConfigurationChangedEvent): boolean {
+		const options = this._context.configuration.options;
+
+		if (e.hasChanged(EditorOption.lineHeight)) {
+			this._zoneManager.setLineHeight(options.get(EditorOption.lineHeight));
+			this._render();
 		}
 
-		if (e.viewInfo.canUseTranslate3d) {
-			this._overviewRuler.setCanUseTranslate3d(this._context.configuration.editor.viewInfo.canUseTranslate3d, true);
-			return true;
+		if (e.hasChanged(EditorOption.pixelRatio)) {
+			this._zoneManager.setPixelRatio(options.get(EditorOption.pixelRatio));
+			this._domNode.setWidth(this._zoneManager.getDOMWidth());
+			this._domNode.setHeight(this._zoneManager.getDOMHeight());
+			this._domNode.domNode.width = this._zoneManager.getCanvasWidth();
+			this._domNode.domNode.height = this._zoneManager.getCanvasHeight();
+			this._render();
 		}
 
-		return false;
-	}
-
-	public onFlushed(e: viewEvents.ViewFlushedEvent): boolean {
 		return true;
 	}
-
-	public onScrollChanged(e: viewEvents.ViewScrollChangedEvent): boolean {
-		this._overviewRuler.setScrollHeight(e.scrollHeight, true);
-		return super.onScrollChanged(e) || e.scrollHeightChanged;
+	public override onFlushed(e: viewEvents.ViewFlushedEvent): boolean {
+		this._render();
+		return true;
 	}
-
-	public onZonesChanged(e: viewEvents.ViewZonesChangedEvent): boolean {
+	public override onScrollChanged(e: viewEvents.ViewScrollChangedEvent): boolean {
+		if (e.scrollHeightChanged) {
+			this._zoneManager.setOuterHeight(e.scrollHeight);
+			this._render();
+		}
+		return true;
+	}
+	public override onZonesChanged(e: viewEvents.ViewZonesChangedEvent): boolean {
+		this._render();
 		return true;
 	}
 
 	// ---- end view event handlers
 
 	public getDomNode(): HTMLElement {
-		return this._overviewRuler.getDomNode();
+		return this._domNode.domNode;
 	}
 
 	public setLayout(position: OverviewRulerPosition): void {
-		this._overviewRuler.setLayout(position, true);
+		this._domNode.setTop(position.top);
+		this._domNode.setRight(position.right);
+
+		let hasChanged = false;
+		hasChanged = this._zoneManager.setDOMWidth(position.width) || hasChanged;
+		hasChanged = this._zoneManager.setDOMHeight(position.height) || hasChanged;
+
+		if (hasChanged) {
+			this._domNode.setWidth(this._zoneManager.getDOMWidth());
+			this._domNode.setHeight(this._zoneManager.getDOMHeight());
+			this._domNode.domNode.width = this._zoneManager.getCanvasWidth();
+			this._domNode.domNode.height = this._zoneManager.getCanvasHeight();
+
+			this._render();
+		}
 	}
 
 	public setZones(zones: OverviewRulerZone[]): void {
-		this._overviewRuler.setZones(zones, true);
+		this._zoneManager.setZones(zones);
+		this._render();
+	}
+
+	private _render(): boolean {
+		if (this._zoneManager.getOuterHeight() === 0) {
+			return false;
+		}
+
+		const width = this._zoneManager.getCanvasWidth();
+		const height = this._zoneManager.getCanvasHeight();
+
+		const colorZones = this._zoneManager.resolveColorZones();
+		const id2Color = this._zoneManager.getId2Color();
+
+		const ctx = this._domNode.domNode.getContext('2d')!;
+		ctx.clearRect(0, 0, width, height);
+		if (colorZones.length > 0) {
+			this._renderOneLane(ctx, colorZones, id2Color, width);
+		}
+
+		return true;
+	}
+
+	private _renderOneLane(ctx: CanvasRenderingContext2D, colorZones: ColorZone[], id2Color: string[], width: number): void {
+
+		let currentColorId = 0; // will never match a real color id which is > 0
+		let currentFrom = 0;
+		let currentTo = 0;
+
+		for (const zone of colorZones) {
+
+			const zoneColorId = zone.colorId;
+			const zoneFrom = zone.from;
+			const zoneTo = zone.to;
+
+			if (zoneColorId !== currentColorId) {
+				if (currentColorId !== 0) {
+					ctx.fillRect(0, currentFrom, width, currentTo - currentFrom);
+				}
+
+				currentColorId = zoneColorId;
+				ctx.fillStyle = id2Color[currentColorId];
+				currentFrom = zoneFrom;
+				currentTo = zoneTo;
+			} else {
+				if (currentTo >= zoneFrom) {
+					currentTo = Math.max(currentTo, zoneTo);
+				} else {
+					ctx.fillRect(0, currentFrom, width, currentTo - currentFrom);
+					currentFrom = zoneFrom;
+					currentTo = zoneTo;
+				}
+			}
+		}
+
+		ctx.fillRect(0, currentFrom, width, currentTo - currentFrom);
+
 	}
 }

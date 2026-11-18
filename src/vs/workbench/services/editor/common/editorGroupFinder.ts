@@ -1,0 +1,329 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { EditorActivation } from '../../../../platform/editor/common/editor.js';
+import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { EditorInputWithOptions, isEditorInputWithOptions, IUntypedEditorInput, isEditorInput, EditorInputCapabilities } from '../../../common/editor.js';
+import { EditorInput } from '../../../common/editor/editorInput.js';
+import { IEditorGroup, GroupsOrder, preferredSideBySideGroupDirection, IEditorGroupsService, IModalEditorPart, IEditorGroupsContainer, getWindowMainPart } from './editorGroupsService.js';
+import { AUX_WINDOW_GROUP, AUX_WINDOW_GROUP_TYPE, MODAL_GROUP, MODAL_GROUP_TYPE, PreferredGroup, SIDE_GROUP, USE_MODAL_EDITOR_SETTING, UseModalEditorMode } from './editorService.js';
+
+type FindGroupResult = Promise<[IEditorGroup, EditorActivation | undefined]> | [IEditorGroup, EditorActivation | undefined];
+
+/**
+ * Finds the target `IEditorGroup` given the instructions provided
+ * that is best for the editor and matches the preferred group if
+ * possible.
+ */
+export function findGroup(accessor: ServicesAccessor, editor: IUntypedEditorInput, preferredGroup: Exclude<PreferredGroup, AUX_WINDOW_GROUP_TYPE | MODAL_GROUP_TYPE> | undefined): FindGroupResult;
+export function findGroup(accessor: ServicesAccessor, editor: EditorInputWithOptions, preferredGroup: Exclude<PreferredGroup, AUX_WINDOW_GROUP_TYPE | MODAL_GROUP_TYPE> | undefined): FindGroupResult;
+export function findGroup(accessor: ServicesAccessor, editor: EditorInputWithOptions | IUntypedEditorInput, preferredGroup: Exclude<PreferredGroup, AUX_WINDOW_GROUP_TYPE | MODAL_GROUP_TYPE> | undefined): FindGroupResult;
+export function findGroup(accessor: ServicesAccessor, editor: IUntypedEditorInput, preferredGroup: AUX_WINDOW_GROUP_TYPE | MODAL_GROUP_TYPE): Promise<[IEditorGroup, EditorActivation | undefined]>;
+export function findGroup(accessor: ServicesAccessor, editor: EditorInputWithOptions, preferredGroup: AUX_WINDOW_GROUP_TYPE | MODAL_GROUP_TYPE): Promise<[IEditorGroup, EditorActivation | undefined]>;
+export function findGroup(accessor: ServicesAccessor, editor: EditorInputWithOptions | IUntypedEditorInput, preferredGroup: AUX_WINDOW_GROUP_TYPE | MODAL_GROUP_TYPE): Promise<[IEditorGroup, EditorActivation | undefined]>;
+export function findGroup(accessor: ServicesAccessor, editor: EditorInputWithOptions | IUntypedEditorInput, preferredGroup: PreferredGroup | undefined, groupsContainer?: IEditorGroupsContainer): FindGroupResult;
+/**
+ * @param groupsContainer the groups that an open without a specific group
+ * (the active group or to the side) resolves against, such as the groups of
+ * one editor part. Defaults to all groups.
+ */
+export function findGroup(accessor: ServicesAccessor, editor: EditorInputWithOptions | IUntypedEditorInput, preferredGroup: PreferredGroup | undefined, groupsContainer?: IEditorGroupsContainer): FindGroupResult {
+	const editorGroupService = accessor.get(IEditorGroupsService);
+	const configurationService = accessor.get(IConfigurationService);
+
+	const group = doFindGroup(editor, preferredGroup, editorGroupService, groupsContainer ?? editorGroupService, configurationService);
+	if (group instanceof Promise) {
+		return group.then(group => handleGroupResult(group, editor, preferredGroup, editorGroupService, configurationService));
+	}
+
+	return handleGroupResult(group, editor, preferredGroup, editorGroupService, configurationService);
+}
+
+function handleGroupResult(group: IEditorGroup, editor: EditorInputWithOptions | IUntypedEditorInput, preferredGroup: PreferredGroup | undefined, editorGroupService: IEditorGroupsService, configurationService: IConfigurationService): FindGroupResult {
+	const modalEditorPart = editorGroupService.activeModalEditorPart;
+	const modalEditorMode = configurationService.getValue<UseModalEditorMode>(USE_MODAL_EDITOR_SETTING);
+	const editorInput = isEditorInputWithOptions(editor) ? editor.editor : isEditorInput(editor) ? editor : undefined;
+	// The `RequiresModal` capability is honored unless the user has explicitly
+	// disabled modal editors via `workbench.editor.useModal: 'off'`, in which
+	// case the user preference wins.
+	const requiresModal = editorInput instanceof EditorInput && editorInput.hasCapability(EditorInputCapabilities.RequiresModal) && modalEditorMode !== 'off';
+	if (modalEditorPart && preferredGroup !== MODAL_GROUP && modalEditorMode !== 'all' && !requiresModal) {
+		// Only allow to open in modal group if MODAL_GROUP is explicitly requested
+		// or when the setting is configured to open all editors modal or when the
+		// editor has the RequiresModal capability.
+		return handleModalEditorPart(group, editor, modalEditorPart, editorGroupService, preferredGroup);
+	}
+
+	return handleGroupActivation(group, editor, preferredGroup, editorGroupService);
+}
+
+async function handleModalEditorPart(group: IEditorGroup, editor: EditorInputWithOptions | IUntypedEditorInput, modalEditorPart: IModalEditorPart, editorGroupService: IEditorGroupsService, preferredGroup: PreferredGroup | undefined): Promise<[IEditorGroup, EditorActivation | undefined]> {
+	const options = editor.options;
+
+	// If the resolved group is part of the modal, redirect
+	// to the main window active group instead
+	if (modalEditorPart.groups.some(modalGroup => modalGroup.id === group.id)) {
+		group = editorGroupService.mainPart.activeGroup;
+	}
+
+	// Try to close the modal editor part unless preserveFocus is set
+	if (!options?.preserveFocus) {
+		await modalEditorPart.close();
+	}
+
+	return handleGroupActivation(group, editor, preferredGroup, editorGroupService);
+}
+
+function handleGroupActivation(group: IEditorGroup, editor: EditorInputWithOptions | IUntypedEditorInput, preferredGroup: PreferredGroup | undefined, editorGroupService: IEditorGroupsService): [IEditorGroup, EditorActivation | undefined] {
+
+	// Resolve editor activation strategy
+	let activation: EditorActivation | undefined = undefined;
+	if (
+		editorGroupService.activeGroup !== group && 		// only if target group is not already active
+		editor.options && !editor.options.inactive &&		// never for inactive editors
+		editor.options.preserveFocus &&						// only if preserveFocus
+		typeof editor.options.activation !== 'number' &&	// only if activation is not already defined (either true or false)
+		preferredGroup !== SIDE_GROUP						// never for the SIDE_GROUP
+	) {
+		// If the resolved group is not the active one, we typically
+		// want the group to become active. There are a few cases
+		// where we stay away from encorcing this, e.g. if the caller
+		// is already providing `activation`.
+		//
+		// Specifically for historic reasons we do not activate a
+		// group is it is opened as `SIDE_GROUP` with `preserveFocus:true`.
+		// repeated Alt-clicking of files in the explorer always open
+		// into the same side group and not cause a group to be created each time.
+		activation = EditorActivation.ACTIVATE;
+	}
+
+	return [group, activation];
+}
+
+function doFindGroup(input: EditorInputWithOptions | IUntypedEditorInput, preferredGroup: PreferredGroup | undefined, editorGroupService: IEditorGroupsService, groupsContainer: IEditorGroupsContainer, configurationService: IConfigurationService): Promise<IEditorGroup> | IEditorGroup {
+	let group: Promise<IEditorGroup> | IEditorGroup | undefined;
+	const editor = isEditorInputWithOptions(input) ? input.editor : input;
+	const options = input.options;
+
+	// Group: Force modal if the editor has the RequiresModal capability,
+	// but respect `workbench.editor.useModal: 'off'` as an explicit opt-out.
+	if (isEditorInput(editor) && editor.hasCapability(EditorInputCapabilities.RequiresModal) && configurationService.getValue<UseModalEditorMode>(USE_MODAL_EDITOR_SETTING) !== 'off') {
+		group = editorGroupService.createModalEditorPart(options?.modal)
+			.then(part => part.activeGroup);
+	}
+
+	// Group: Instance of Group
+	else if (preferredGroup && typeof preferredGroup !== 'number') {
+		group = preferredGroup;
+	}
+
+	// Group: Specific Group, such as of a column. A group that holds an
+	// editor that renders its own title hands the editor off, as the
+	// active group does.
+	else if (typeof preferredGroup === 'number' && preferredGroup >= 0) {
+		const specificGroup = editorGroupService.getGroup(preferredGroup);
+		group = specificGroup && handOffFromSelfTitledEditorFor(editor, specificGroup, editorGroupService);
+
+		// A handoff target that is locked for the editor is replaced by an
+		// unlocked group of its part, or a new one, as the caller did not
+		// select the locked group.
+		if (group && group !== specificGroup && isGroupLockedForEditor(group, editor)) {
+			const destinationPart = editorGroupService.getPart(group);
+			group = destinationPart.getGroups(GroupsOrder.MOST_RECENTLY_ACTIVE).find(candidate => !isGroupLockedForEditor(candidate, editor))
+				?? destinationPart.addGroup(group, preferredSideBySideGroupDirection(configurationService));
+		}
+	}
+
+	// Group: Side by Side, of the active group or of the group it hands
+	// the editor off to
+	else if (preferredGroup === SIDE_GROUP) {
+		const direction = preferredSideBySideGroupDirection(configurationService);
+		const activeGroup = groupsContainer.activeGroup;
+		const sourceGroup = handOffFromSelfTitledEditorFor(editor, activeGroup, editorGroupService);
+		const sourceContainer = sourceGroup === activeGroup ? groupsContainer : editorGroupService.getPart(sourceGroup);
+
+		let candidateGroup = sourceContainer.findGroup({ direction }, sourceGroup);
+		if (!candidateGroup || isGroupLockedForEditor(candidateGroup, editor) || handOffFromSelfTitledEditorFor(editor, candidateGroup, editorGroupService) !== candidateGroup) {
+			// Create new group either when the candidate group
+			// is locked, hands the editor off or was not found
+			// in the direction
+			candidateGroup = sourceContainer.addGroup(sourceGroup, direction);
+		}
+
+		group = candidateGroup;
+	}
+
+	// Group: Aux Window
+	else if (preferredGroup === AUX_WINDOW_GROUP) {
+		group = editorGroupService.createAuxiliaryEditorPart(options?.auxiliary)
+			.then(group => group.activeGroup);
+	}
+
+	// Group: Modal (gated behind a setting)
+	else if (preferredGroup === MODAL_GROUP && configurationService.getValue<UseModalEditorMode>(USE_MODAL_EDITOR_SETTING) !== 'off') {
+		group = editorGroupService.createModalEditorPart(options?.modal)
+			.then(part => part.activeGroup);
+	}
+
+	// Group: Unspecified without a specific index to open
+	else if (!options || typeof options.index !== 'number') {
+		const groupsByLastActive = editorGroupService.getGroups(GroupsOrder.MOST_RECENTLY_ACTIVE);
+
+		// Respect option to reveal an editor if it is already visible in any group
+		if (options?.revealIfVisible) {
+			for (const lastActiveGroup of groupsByLastActive) {
+				if (isActive(lastActiveGroup, editor)) {
+					group = lastActiveGroup;
+					break;
+				}
+			}
+		}
+
+		// Respect option to reveal an editor if it is open (not necessarily visible)
+		// Still prefer to reveal an editor in a group where the editor is active though.
+		// We also try to reveal an editor if it has the `ForceReveal` or `Singleton`
+		// capability which indicates that editor prefers to be revealed.
+		if (!group) {
+			if (options?.revealIfOpened || configurationService.getValue<boolean>('workbench.editor.revealIfOpen') || (isEditorInput(editor) && (editor.hasCapability(EditorInputCapabilities.ForceReveal) || editor.hasCapability(EditorInputCapabilities.Singleton)))) {
+				let groupWithInputActive: IEditorGroup | undefined = undefined;
+				let groupWithInputOpened: IEditorGroup | undefined = undefined;
+
+				for (const group of groupsByLastActive) {
+					if (isOpened(group, editor)) {
+						if (!groupWithInputOpened) {
+							groupWithInputOpened = group;
+						}
+
+						if (!groupWithInputActive && group.isActive(editor)) {
+							groupWithInputActive = group;
+						}
+					}
+
+					if (groupWithInputOpened && groupWithInputActive) {
+						break; // we found all groups we wanted
+					}
+				}
+
+				// Prefer a target group where the input is visible
+				group = groupWithInputActive || groupWithInputOpened;
+			}
+		}
+	}
+
+	// Force modal editor part: redirect to the modal group when setting is 'on'
+	if (!group && configurationService.getValue<UseModalEditorMode>(USE_MODAL_EDITOR_SETTING) === 'all') {
+		group = editorGroupService.createModalEditorPart(options?.modal)
+			.then(part => part.activeGroup);
+	}
+
+	// Fallback to active group if target not valid but avoid
+	// locked editor groups unless editor is already opened there
+	if (!group) {
+		let candidateGroup = handOffFromSelfTitledEditor(groupsContainer.activeGroup, editorGroupService);
+
+		// Locked group: find the next non-locked group
+		// going up the neigbours of the group or create
+		// a new group otherwise. A group that hands off
+		// its editors does so here too.
+		if (isGroupLockedForEditor(candidateGroup, editor)) {
+			for (const group of groupsContainer.getGroups(GroupsOrder.MOST_RECENTLY_ACTIVE)) {
+				const handOffGroup = handOffFromSelfTitledEditor(group, editorGroupService);
+				if (isGroupLockedForEditor(handOffGroup, editor)) {
+					continue;
+				}
+
+				candidateGroup = handOffGroup;
+				break;
+			}
+
+			if (isGroupLockedForEditor(candidateGroup, editor)) {
+				// Group is still locked, so we have to create a new
+				// group to the side of the candidate group
+				group = groupsContainer.addGroup(candidateGroup, preferredSideBySideGroupDirection(configurationService));
+			} else {
+				group = candidateGroup;
+			}
+		}
+
+		// Non-locked group: take as is
+		else {
+			group = candidateGroup;
+		}
+	}
+
+	return group;
+}
+
+/**
+ * A group that holds an editor that renders its own title, such as a view
+ * shown as an editor, does not take other editors opened in it: they go to
+ * the active group of the main part of its window (the first part created in
+ * it), as editors opened from a view go to the editor area. Only an explicit
+ * group, such as of a drop or a move, puts editors beside it.
+ */
+export function handOffFromSelfTitledEditor(group: IEditorGroup, editorGroupService: Pick<IEditorGroupsService, 'parts' | 'mainPart'>): IEditorGroup {
+	const holdsSelfTitledEditor = (group.count === 1 && group.activeEditorPane?.providesTitle) || group.editors.some(editor => editor.hasCapability(EditorInputCapabilities.ProvidesTitle));
+	if (!holdsSelfTitledEditor) {
+		return group;
+	}
+
+	const windowMainPart = getWindowMainPart(editorGroupService, group.windowId);
+	if (windowMainPart.groups.some(candidate => candidate.id === group.id)) {
+		return group;
+	}
+
+	return windowMainPart.activeGroup;
+}
+
+/**
+ * The group `editor` opens in when it is opened in `group`, such as by its id
+ * or to the side of it: the group {@link handOffFromSelfTitledEditor} hands
+ * it off to, unless the editor renders its own title, such as a chat, which
+ * opens beside other such editors, or it is open in the group already, which
+ * reveals it there.
+ */
+function handOffFromSelfTitledEditorFor(editor: EditorInput | IUntypedEditorInput, group: IEditorGroup, editorGroupService: Pick<IEditorGroupsService, 'parts' | 'mainPart'>): IEditorGroup {
+	if ((isEditorInput(editor) && editor.hasCapability(EditorInputCapabilities.ProvidesTitle)) || isOpened(group, editor)) {
+		return group;
+	}
+
+	return handOffFromSelfTitledEditor(group, editorGroupService);
+}
+
+function isGroupLockedForEditor(group: IEditorGroup, editor: EditorInput | IUntypedEditorInput): boolean {
+	if (!group.isLocked) {
+		// only relevant for locked editor groups
+		return false;
+	}
+
+	if (isOpened(group, editor)) {
+		// special case: the locked group contains
+		// the provided editor. in that case we do not want
+		// to open the editor in any different group.
+		return false;
+	}
+
+	// group is locked for this editor
+	return true;
+}
+
+function isActive(group: IEditorGroup, editor: EditorInput | IUntypedEditorInput): boolean {
+	if (!group.activeEditor) {
+		return false;
+	}
+
+	return group.activeEditor.matches(editor);
+}
+
+function isOpened(group: IEditorGroup, editor: EditorInput | IUntypedEditorInput): boolean {
+	for (const typedEditor of group.editors) {
+		if (typedEditor.matches(editor)) {
+			return true;
+		}
+	}
+
+	return false;
+}

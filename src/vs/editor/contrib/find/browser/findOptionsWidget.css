@@ -4,17 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 .monaco-editor .findOptionsWidget {
-	background-color: #EFEFF2;
-	box-shadow: 0 2px 8px #A8A8A8;
-}
-
-.monaco-editor.vs-dark .findOptionsWidget {
-	background-color: #2D2D30;
-	box-shadow: 0 2px 8px #000;
-}
-
-.monaco-editor.hc-black .findOptionsWidget {
-	border: 2px solid #6FC3DF;
-	background: #0C141F;
-	box-shadow: none;
+	background-color: var(--vscode-editorWidget-background);
+	color: var(--vscode-editorWidget-foreground);
+	box-shadow: var(--vscode-shadow-lg);
+	border: 2px solid var(--vscode-contrastBorder);
 }

@@ -3,50 +3,48 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
+import './rulers.css';
+import { FastDomNode, createFastDomNode } from '../../../../base/browser/fastDomNode.js';
+import { ViewPart } from '../../view/viewPart.js';
+import { RenderingContext, RestrictedRenderingContext } from '../../view/renderingContext.js';
+import { ViewContext } from '../../../common/viewModel/viewContext.js';
+import * as viewEvents from '../../../common/viewEvents.js';
+import { EditorOption, IRulerOption } from '../../../common/config/editorOptions.js';
 
-import 'vs/css!./rulers';
-import { FastDomNode, createFastDomNode } from 'vs/base/browser/fastDomNode';
-import { ViewPart } from 'vs/editor/browser/view/viewPart';
-import { ViewContext } from 'vs/editor/common/view/viewContext';
-import { RenderingContext, RestrictedRenderingContext } from 'vs/editor/common/view/renderingContext';
-import * as viewEvents from 'vs/editor/common/view/viewEvents';
-
+/**
+ * Rulers are vertical lines that appear at certain columns in the editor. There can be >= 0 rulers
+ * at a time.
+ */
 export class Rulers extends ViewPart {
 
-	public domNode: HTMLElement;
-	private _renderedRulers: FastDomNode<HTMLElement>[];
-	private _rulers: number[];
-	private _height: number;
+	public domNode: FastDomNode<HTMLElement>;
+	private readonly _renderedRulers: FastDomNode<HTMLElement>[];
+	private _rulers: IRulerOption[];
 	private _typicalHalfwidthCharacterWidth: number;
 
 	constructor(context: ViewContext) {
 		super(context);
-		this.domNode = document.createElement('div');
-		this.domNode.className = 'view-rulers';
+		this.domNode = createFastDomNode<HTMLElement>(document.createElement('div'));
+		this.domNode.setAttribute('role', 'presentation');
+		this.domNode.setAttribute('aria-hidden', 'true');
+		this.domNode.setClassName('view-rulers');
 		this._renderedRulers = [];
-		this._rulers = this._context.configuration.editor.viewInfo.rulers;
-		this._height = this._context.configuration.editor.layoutInfo.contentHeight;
-		this._typicalHalfwidthCharacterWidth = this._context.configuration.editor.fontInfo.typicalHalfwidthCharacterWidth;
+		const options = this._context.configuration.options;
+		this._rulers = options.get(EditorOption.rulers);
+		this._typicalHalfwidthCharacterWidth = options.get(EditorOption.fontInfo).typicalHalfwidthCharacterWidth;
 	}
 
-	public dispose(): void {
-		super.dispose();
-	}
 
 	// --- begin event handlers
 
-	public onConfigurationChanged(e: viewEvents.ViewConfigurationChangedEvent): boolean {
-		if (e.viewInfo.rulers || e.layoutInfo || e.fontInfo) {
-			this._rulers = this._context.configuration.editor.viewInfo.rulers;
-			this._height = this._context.configuration.editor.layoutInfo.contentHeight;
-			this._typicalHalfwidthCharacterWidth = this._context.configuration.editor.fontInfo.typicalHalfwidthCharacterWidth;
-			return true;
-		}
-		return false;
+	public override onConfigurationChanged(e: viewEvents.ViewConfigurationChangedEvent): boolean {
+		const options = this._context.configuration.options;
+		this._rulers = options.get(EditorOption.rulers);
+		this._typicalHalfwidthCharacterWidth = options.get(EditorOption.fontInfo).typicalHalfwidthCharacterWidth;
+		return true;
 	}
-	public onScrollChanged(e: viewEvents.ViewScrollChangedEvent): boolean {
-		return super.onScrollChanged(e) || e.scrollHeightChanged;
+	public override onScrollChanged(e: viewEvents.ViewScrollChangedEvent): boolean {
+		return e.scrollHeightChanged;
 	}
 
 	// --- end event handlers
@@ -65,12 +63,12 @@ export class Rulers extends ViewPart {
 		}
 
 		if (currentCount < desiredCount) {
-			// Add more rulers
 			let addCount = desiredCount - currentCount;
 			while (addCount > 0) {
-				let node = createFastDomNode(document.createElement('div'));
+				const node = createFastDomNode(document.createElement('div'));
 				node.setClassName('view-ruler');
-				this.domNode.appendChild(node.domNode);
+				node.setWidth('1ch');
+				this.domNode.appendChild(node);
 				this._renderedRulers.push(node);
 				addCount--;
 			}
@@ -79,8 +77,8 @@ export class Rulers extends ViewPart {
 
 		let removeCount = currentCount - desiredCount;
 		while (removeCount > 0) {
-			let node = this._renderedRulers.pop();
-			this.domNode.removeChild(node.domNode);
+			const node = this._renderedRulers.pop()!;
+			this.domNode.removeChild(node);
 			removeCount--;
 		}
 	}
@@ -90,10 +88,12 @@ export class Rulers extends ViewPart {
 		this._ensureRulersCount();
 
 		for (let i = 0, len = this._rulers.length; i < len; i++) {
-			let node = this._renderedRulers[i];
+			const node = this._renderedRulers[i];
+			const ruler = this._rulers[i];
 
+			node.setBoxShadow(ruler.color ? `1px 0 0 0 ${ruler.color} inset` : ``);
 			node.setHeight(Math.min(ctx.scrollHeight, 1000000));
-			node.setLeft(this._rulers[i] * this._typicalHalfwidthCharacterWidth);
+			node.setLeft(ruler.column * this._typicalHalfwidthCharacterWidth);
 		}
 	}
 }

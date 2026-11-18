@@ -12,30 +12,36 @@ function code() {
 
 	if [[ "$OSTYPE" == "darwin"* ]]; then
 		NAME=`node -p "require('./product.json').nameLong"`
-		CODE="./.build/electron/$NAME.app/Contents/MacOS/Electron"
+		EXE_NAME=`node -p "require('./product.json').nameShort"`
+		CODE="./.build/electron/$NAME.app/Contents/MacOS/$EXE_NAME"
 	else
 		NAME=`node -p "require('./product.json').applicationName"`
 		CODE=".build/electron/$NAME"
 	fi
 
-	INTENDED_VERSION="v`node -p "require('./package.json').electronVersion"`"
-	INSTALLED_VERSION=`cat .build/electron/version 2> /dev/null`
+	# Get electron, compile, built-in extensions
+	if [[ -z "${VSCODE_SKIP_PRELAUNCH}" ]]; then
+		node build/lib/preLaunch.ts
+	fi
 
-	# Node modules
-	test -d node_modules || ./scripts/npm.sh install
+	# Manage built-in extensions
+	if [[ "$1" == "--builtin" ]]; then
+		exec "$CODE" build/builtin
+		return
+	fi
 
-	# Get electron
-	(test -f "$CODE" && [ $INTENDED_VERSION == $INSTALLED_VERSION ]) || ./node_modules/.bin/gulp electron
-
-	# Build
-	test -d out || ./node_modules/.bin/gulp compile
+	# Disable test extension
+	DISABLE_TEST_EXTENSION="--disable-extension=vscode.vscode-api-tests"
+	if [[ "$@" == *"--extensionTestsPath"* ]]; then
+		DISABLE_TEST_EXTENSION=""
+	fi
 
 	ELECTRON_RUN_AS_NODE=1 \
 	NODE_ENV=development \
 	VSCODE_DEV=1 \
 	ELECTRON_ENABLE_LOGGING=1 \
 	ELECTRON_ENABLE_STACK_DUMPING=1 \
-	"$CODE" --debug=5874 "$ROOT/out/cli.js" . "$@"
+	"$CODE" --inspect=5874 "$ROOT/out/cli.js" . $DISABLE_TEST_EXTENSION "$@"
 }
 
 code "$@"

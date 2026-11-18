@@ -1,8 +1,10 @@
-[CustomMessages]
-AddContextMenuFiles="%1(À¸)·Î ¿­±â" ÀÛ¾÷À» Windows Å½»ö±â ÆÄÀÏÀÇ »óÈ²¿¡ ¸Â´Â ¸Ş´º¿¡ Ãß°¡
-AddContextMenuFolders="%1(À¸)·Î ¿­±â" ÀÛ¾÷À» Windows Å½»ö±â µğ·ºÅÍ¸®ÀÇ »óÈ²¿¡ ¸Â´Â ¸Ş´º¿¡ Ãß°¡
-AssociateWithFiles=%1À»(¸¦) Áö¿øµÇ´Â ÆÄÀÏ Çü½Ä¿¡ ´ëÇÑ ÆíÁı±â·Î µî·ÏÇÕ´Ï´Ù.
-AddToPath=PATH¿¡ Ãß°¡(´Ù½Ã ½ÃÀÛÇÑ ÈÄ »ç¿ë °¡´É)
-RunAfter=¼³Ä¡ ÈÄ %1 ½ÇÇà
-Other=±âÅ¸:
-SourceFile=%1 ¿øº» ÆÄÀÏ
+ï»¿[CustomMessages]
+AddContextMenuFiles="%1(ìœ¼)ë¡œ ì—´ê¸°" ì‘ì—…ì„ Windows íƒìƒ‰ê¸° íŒŒì¼ì˜ ìƒí™©ì— ë§ëŠ” ë©”ë‰´ì— ì¶”ê°€
+AddContextMenuFolders="%1(ìœ¼)ë¡œ ì—´ê¸°" ì‘ì—…ì„ Windows íƒìƒ‰ê¸° ë””ë ‰í„°ë¦¬ì˜ ìƒí™©ì— ë§ëŠ” ë©”ë‰´ì— ì¶”ê°€
+AssociateWithFiles=%1ì„(ë¥¼) ì§€ì›ë˜ëŠ” íŒŒì¼ í˜•ì‹ì— ëŒ€í•œ í¸ì§‘ê¸°ë¡œ ë“±ë¡í•©ë‹ˆë‹¤.
+AddToPath=PATHì— ì¶”ê°€(ë‹¤ì‹œ ì‹œì‘í•œ í›„ ì‚¬ìš© ê°€ëŠ¥)
+RunAfter=ì„¤ì¹˜ í›„ %1 ì‹¤í–‰
+Other=ê¸°íƒ€:
+SourceFile=%1 ì›ë³¸ íŒŒì¼
+OpenWithCodeContextMenu=%1(ìœ¼)ë¡œ ì—´ê¸°
+UpdatingVisualStudioCode=Visual Studio Code ì—…ë°ì´íŠ¸ ì¤‘...

@@ -3,36 +3,32 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { IDisposable, dispose } from 'vs/base/common/lifecycle';
-import { IMessagePassingProtocol } from 'vs/base/parts/ipc/common/ipc';
-import Event, { Emitter } from 'vs/base/common/event';
+import { VSBuffer } from '../../../common/buffer.js';
+import { Event } from '../../../common/event.js';
+import { IMessagePassingProtocol } from './ipc.js';
 
 export interface Sender {
-	send(channel: string, ...args: any[]): void;
+	send(channel: string, msg: unknown): void;
 }
 
+/**
+ * The Electron `Protocol` leverages Electron style IPC communication (`ipcRenderer`, `ipcMain`)
+ * for the implementation of the `IMessagePassingProtocol`. That style of API requires a channel
+ * name for sending data.
+ */
 export class Protocol implements IMessagePassingProtocol {
 
-	private listener: IDisposable;
+	constructor(private sender: Sender, readonly onMessage: Event<VSBuffer>) { }
 
-	private _onMessage: Event<any>;
-	get onMessage(): Event<any> { return this._onMessage; }
-
-	constructor(private sender: Sender, private onMessageEvent: Event<any>) {
-		const emitter = new Emitter<any>();
-		onMessageEvent(msg => emitter.fire(msg));
-		this._onMessage = emitter.event;
-	}
-
-	send(message: any): void {
+	send(message: VSBuffer): void {
 		try {
-			this.sender.send('ipc:message', message);
+			this.sender.send('vscode:message', message.buffer);
 		} catch (e) {
 			// systems are going down
 		}
 	}
 
-	dispose(): void {
-		this.listener = dispose(this.listener);
+	disconnect(): void {
+		this.sender.send('vscode:disconnect', null);
 	}
 }

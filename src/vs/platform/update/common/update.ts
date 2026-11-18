@@ -3,56 +3,166 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
-
-import Event from 'vs/base/common/event';
-import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import { TPromise } from 'vs/base/common/winjs.base';
-
-export enum State {
-	Uninitialized,
-	Idle,
-	CheckingForUpdate,
-	UpdateAvailable,
-	UpdateDownloaded
-}
-
-export enum ExplicitState {
-	Implicit,
-	Explicit
-}
-
-export interface IRawUpdate {
-	releaseNotes: string;
-	version: string;
-	date: Date;
-}
+import { CancellationToken } from '../../../base/common/cancellation.js';
+import { Event } from '../../../base/common/event.js';
+import { OperatingSystem } from '../../../base/common/platform.js';
+import { upcast } from '../../../base/common/types.js';
+import { createDecorator } from '../../instantiation/common/instantiation.js';
 
 export interface IUpdate {
-	version: string;
-	date?: Date;
-	releaseNotes?: string;
+	version: string; // Build commit ID
+	productVersion?: string; // Product version like 1.2.3
+	timestamp?: number;
 	url?: string;
+	sha256hash?: string;
 }
 
-export interface IAutoUpdater extends NodeJS.EventEmitter {
+/**
+ * Updates are run as a state machine:
+ *
+ *      Uninitialized
+ *           ↓
+ *          Idle
+ *          ↓  ↑
+ *   Checking for Updates  →  Available for Download
+ *         ↓                    ↓
+ *                     ←   Overwriting
+ *     Downloading              ↑
+ *                     →      Ready
+ *         ↓                    ↑
+ *     Downloaded      →     Updating
+ *
+ * Available: There is an update available for download (linux, darwin on metered connection).
+ * Ready: Code will be updated as soon as it restarts (win32, darwin).
+ * Downloaded: There is an update ready to be installed in the background (win32).
+ * Overwriting: A newer update is being downloaded to replace the pending update (darwin).
+ * Cancelling: Updates are being disabled at runtime; in-flight/pending work is being torn down before Disabled.
+ */
+
+export const enum StateType {
+	Uninitialized = 'uninitialized',
+	Idle = 'idle',
+	Disabled = 'disabled',
+	CheckingForUpdates = 'checking for updates',
+	AvailableForDownload = 'available for download',
+	Downloading = 'downloading',
+	Downloaded = 'downloaded',
+	Updating = 'updating',
+	Ready = 'ready',
+	Overwriting = 'overwriting',
+	Cancelling = 'cancelling',
+	Restarting = 'restarting',
+}
+
+export const enum UpdateType {
+	Setup,
+	Archive,
+	Snap
+}
+
+export const enum DisablementReason {
+	NotBuilt,
+	DisabledByEnvironment,
+	ManuallyDisabled,
+	Policy,
+	MissingConfiguration,
+	InvalidConfiguration,
+	RunningAsAdmin,
+}
+
+export type Uninitialized = { type: StateType.Uninitialized };
+export type Disabled = { type: StateType.Disabled; reason: DisablementReason };
+export type Idle = { type: StateType.Idle; updateType: UpdateType; error?: string; notAvailable?: boolean };
+export type CheckingForUpdates = { type: StateType.CheckingForUpdates; explicit: boolean };
+export type AvailableForDownload = { type: StateType.AvailableForDownload; update: IUpdate; canInstall?: boolean };
+export type Downloading = { type: StateType.Downloading; update?: IUpdate; explicit: boolean; overwrite: boolean; downloadedBytes?: number; totalBytes?: number; startTime?: number };
+export type Downloaded = { type: StateType.Downloaded; update: IUpdate; explicit: boolean; overwrite: boolean };
+export type Updating = { type: StateType.Updating; update: IUpdate; currentProgress?: number; maxProgress?: number; explicit: boolean };
+export type Ready = { type: StateType.Ready; update: IUpdate; explicit: boolean; overwrite: boolean };
+export type Overwriting = { type: StateType.Overwriting; update: IUpdate; explicit: boolean };
+export type Cancelling = { type: StateType.Cancelling };
+export type Restarting = { type: StateType.Restarting; update: IUpdate };
+
+export type State = Uninitialized | Disabled | Idle | CheckingForUpdates | AvailableForDownload | Downloading | Downloaded | Updating | Ready | Overwriting | Cancelling | Restarting;
+
+export const State = {
+	Uninitialized: upcast<Uninitialized>({ type: StateType.Uninitialized }),
+	Disabled: (reason: DisablementReason): Disabled => ({ type: StateType.Disabled, reason }),
+	Idle: (updateType: UpdateType, error?: string, notAvailable?: boolean): Idle => ({ type: StateType.Idle, updateType, error, notAvailable }),
+	CheckingForUpdates: (explicit: boolean): CheckingForUpdates => ({ type: StateType.CheckingForUpdates, explicit }),
+	AvailableForDownload: (update: IUpdate, canInstall?: boolean): AvailableForDownload => ({ type: StateType.AvailableForDownload, update, canInstall }),
+	Downloading: (update: IUpdate | undefined, explicit: boolean, overwrite: boolean, downloadedBytes?: number, totalBytes?: number, startTime?: number): Downloading => ({ type: StateType.Downloading, update, explicit, overwrite, downloadedBytes, totalBytes, startTime }),
+	Downloaded: (update: IUpdate, explicit: boolean, overwrite: boolean): Downloaded => ({ type: StateType.Downloaded, update, explicit, overwrite }),
+	Updating: (update: IUpdate, explicit: boolean, currentProgress?: number, maxProgress?: number): Updating => ({ type: StateType.Updating, update, explicit, currentProgress, maxProgress }),
+	Ready: (update: IUpdate, explicit: boolean, overwrite: boolean): Ready => ({ type: StateType.Ready, update, explicit, overwrite }),
+	Overwriting: (update: IUpdate, explicit: boolean): Overwriting => ({ type: StateType.Overwriting, update, explicit }),
+	Cancelling: upcast<Cancelling>({ type: StateType.Cancelling }),
+	Restarting: (update: IUpdate): Restarting => ({ type: StateType.Restarting, update }),
+};
+
+export interface IAutoUpdater extends Event.NodeEventEmitter {
 	setFeedURL(url: string): void;
 	checkForUpdates(): void;
+	applyUpdate?(): Promise<void>;
 	quitAndInstall(): void;
 }
 
 export const IUpdateService = createDecorator<IUpdateService>('updateService');
 
-export interface IUpdateService {
-	_serviceBrand: any;
+export const RESTART_WHEN_IDLE_SETTING = 'update.restartWhenIdle';
+export const ENABLE_EARLY_STAGING_SETTING = 'update.enableEarlyStaging';
 
-	readonly onError: Event<any>;
-	readonly onUpdateAvailable: Event<{ url: string; version: string; }>;
-	readonly onUpdateNotAvailable: Event<boolean>;
-	readonly onUpdateReady: Event<IRawUpdate>;
+/**
+ * Whether a downloaded update can be applied by restarting while the screen is locked. Windows
+ * is not verified yet: restored windows might show on top of the application the user was in.
+ * Linux reports no screen locks and does not install updates on restart.
+ */
+export function isUnattendedRestartSupported(os: OperatingSystem): boolean {
+	return os === OperatingSystem.Macintosh;
+}
+
+export function isEarlyStagingSupported(os: OperatingSystem): boolean {
+	return os === OperatingSystem.Macintosh;
+}
+
+export interface IQuitAndInstallOptions {
+
+	/**
+	 * The user did not ask for the restart, so like the checks in the background, the
+	 * check for a newer update before restarting skips metered connections.
+	 */
+	readonly unattended?: boolean;
+
+	/**
+	 * Relaunch without activating the application, so that the restart does not take
+	 * focus. Only macOS activates a relaunched application, the windows restore without
+	 * focus on every platform (see `IWindowsMainService.restoreExactlyOnNextStartup`).
+	 */
+	readonly relaunchInBackground?: boolean;
+
+	/**
+	 * Cancels the restart until the shutdown starts, for example when the user returns
+	 * while checking for a newer update.
+	 */
+	readonly token?: CancellationToken;
+}
+
+export interface IUpdateService {
+	readonly _serviceBrand: undefined;
+
 	readonly onStateChange: Event<State>;
 	readonly state: State;
 
-	checkForUpdates(explicit: boolean): TPromise<IUpdate>;
-	quitAndInstall(): TPromise<void>;
+	checkForUpdates(explicit: boolean): Promise<void>;
+	downloadUpdate(explicit: boolean): Promise<void>;
+	applyUpdate(): Promise<void>;
+	quitAndInstall(options?: IQuitAndInstallOptions): Promise<void>;
+
+	/**
+	 * @deprecated This method should not be used any more. It will be removed in a future release.
+	*/
+	isLatestVersion(): Promise<boolean | undefined>;
+	_applySpecificUpdate(packagePath: string): Promise<void>;
+	setInternalOrg(internalOrg: string | undefined): Promise<void>;
+	setEarlyStagingDefault(enabled: boolean): Promise<void>;
 }

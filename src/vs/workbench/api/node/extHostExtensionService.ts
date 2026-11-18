@@ -2,401 +2,244 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import { IDisposable, dispose } from 'vs/base/common/lifecycle';
-import { join } from 'path';
-import { mkdirp, dirExists } from 'vs/base/node/pfs';
-import Severity from 'vs/base/common/severity';
-import { TPromise } from 'vs/base/common/winjs.base';
-import { AbstractExtensionService, ActivatedExtension } from 'vs/platform/extensions/common/abstractExtensionService';
-import { IExtensionDescription } from 'vs/platform/extensions/common/extensions';
-import { ExtHostStorage } from 'vs/workbench/api/node/extHostStorage';
-import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
-import { createApiFactory, initializeExtensionApi } from 'vs/workbench/api/node/extHost.api.impl';
-import { IThreadService } from 'vs/workbench/services/thread/common/threadService';
-import { IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
-import { MainContext, MainProcessExtensionServiceShape, IEnvironment, IInitData } from './extHost.protocol';
-import { createHash } from 'crypto';
+import * as performance from '../../../base/common/performance.js';
+import type * as vscode from 'vscode';
+import { createApiFactoryAndRegisterActors } from '../common/extHost.api.impl.js';
+import { INodeModuleFactory, RequireInterceptor } from '../common/extHostRequireInterceptor.js';
+import { ExtensionActivationTimesBuilder } from '../common/extHostExtensionActivator.js';
+import { connectProxyResolver } from './proxyResolver.js';
+import { AbstractExtHostExtensionService } from '../common/extHostExtensionService.js';
+import { ExtHostDownloadService } from './extHostDownloadService.js';
+import { URI } from '../../../base/common/uri.js';
+import { Schemas } from '../../../base/common/network.js';
+import { IExtensionDescription } from '../../../platform/extensions/common/extensions.js';
+import { ExtensionRuntime } from '../common/extHostTypes.js';
+import { CLIServer } from './extHostCLIServer.js';
+import { realpathSync } from '../../../base/node/pfs.js';
+import { ExtHostConsoleForwarder } from './extHostConsoleForwarder.js';
+import { ExtHostDiskFileSystemProvider } from './extHostDiskFileSystemProvider.js';
+import nodeModule from 'node:module';
+import { assertType } from '../../../base/common/types.js';
+import { generateUuid } from '../../../base/common/uuid.js';
+import { BidirectionalMap } from '../../../base/common/map.js';
+import { DisposableStore, toDisposable } from '../../../base/common/lifecycle.js';
+import { markNodeCompileCacheReady } from '../../../base/node/nodeCompileCache.js';
+const require = nodeModule.createRequire(import.meta.url);
 
-const hasOwnProperty = Object.hasOwnProperty;
+class NodeModuleRequireInterceptor extends RequireInterceptor {
 
-/**
- * Represents the source code (module) of an extension.
- */
-export interface IExtensionModule {
-	activate(ctx: IExtensionContext): TPromise<IExtensionAPI>;
-	deactivate(): void;
-}
-
-/**
- * Represents the API of an extension (return value of `activate`).
- */
-export interface IExtensionAPI {
-	// _extensionAPIBrand: any;
-}
-
-export class ExtHostExtension extends ActivatedExtension {
-
-	module: IExtensionModule;
-	exports: IExtensionAPI;
-	subscriptions: IDisposable[];
-
-	constructor(activationFailed: boolean, module: IExtensionModule, exports: IExtensionAPI, subscriptions: IDisposable[]) {
-		super(activationFailed);
-		this.module = module;
-		this.exports = exports;
-		this.subscriptions = subscriptions;
-	}
-}
-
-export class ExtHostEmptyExtension extends ExtHostExtension {
-	constructor() {
-		super(false, { activate: undefined, deactivate: undefined }, undefined, []);
-	}
-}
-
-export interface IExtensionMemento {
-	get<T>(key: string, defaultValue: T): T;
-	update(key: string, value: any): Thenable<boolean>;
-}
-
-class ExtensionMemento implements IExtensionMemento {
-
-	private _id: string;
-	private _shared: boolean;
-	private _storage: ExtHostStorage;
-
-	private _init: TPromise<ExtensionMemento>;
-	private _value: { [n: string]: any; };
-
-	constructor(id: string, global: boolean, storage: ExtHostStorage) {
-		this._id = id;
-		this._shared = global;
-		this._storage = storage;
-
-		this._init = this._storage.getValue(this._shared, this._id, Object.create(null)).then(value => {
-			this._value = value;
-			return this;
-		});
+	private static _createDataUri(scriptContent: string): string {
+		return `data:text/javascript;base64,${Buffer.from(scriptContent).toString('base64')}`;
 	}
 
-	get whenReady(): TPromise<ExtensionMemento> {
-		return this._init;
+	private static _vscodeImportFnName = `_VSCODE_IMPORT_VSCODE_API`;
+
+	private readonly _store = new DisposableStore();
+
+	dispose(): void {
+		this._store.dispose();
 	}
 
-	get<T>(key: string, defaultValue: T): T {
-		let value = this._value[key];
-		if (typeof value === 'undefined') {
-			value = defaultValue;
-		}
-		return value;
-	}
-
-	update(key: string, value: any): Thenable<boolean> {
-		this._value[key] = value;
-		return this._storage
-			.setValue(this._shared, this._id, this._value)
-			.then(() => true);
-	}
-}
-
-class ExtensionStoragePath {
-
-	private readonly _contextService: IWorkspaceContextService;
-	private readonly _environment: IEnvironment;
-
-	private readonly _ready: TPromise<string>;
-	private _value: string;
-
-	constructor(contextService: IWorkspaceContextService, environment: IEnvironment) {
-		this._contextService = contextService;
-		this._environment = environment;
-		this._ready = this._getOrCreateWorkspaceStoragePath().then(value => this._value = value);
-	}
-
-	get whenReady(): TPromise<any> {
-		return this._ready;
-	}
-
-	value(extension: IExtensionDescription): string {
-		if (this._value) {
-			return join(this._value, extension.id);
-		}
-		return undefined;
-	}
-
-	private _getOrCreateWorkspaceStoragePath(): TPromise<string> {
-
-		const workspace = this._contextService.getWorkspace();
-
-		if (!workspace) {
-			return TPromise.as(undefined);
-		}
-
-		const storageName = createHash('md5')
-			.update(workspace.resource.fsPath)
-			.update(workspace.uid ? workspace.uid.toString() : '')
-			.digest('hex');
-
-		const storagePath = join(this._environment.appSettingsHome, 'workspaceStorage', storageName);
-
-		return dirExists(storagePath).then(exists => {
-			if (exists) {
-				return storagePath;
+	protected _installInterceptor(): void {
+		const that = this;
+		const node_module = require('module');
+		const originalLoad = node_module._load;
+		node_module._load = function load(request: string, parent: { filename: string }, isMain: boolean) {
+			request = applyAlternatives(request);
+			if (!that._factories.has(request)) {
+				return originalLoad.apply(this, arguments);
 			}
-
-			return mkdirp(storagePath).then(success => {
-				return storagePath;
-			}, err => {
-				return undefined;
-			});
-		});
-	}
-}
-
-export interface IExtensionContext {
-	subscriptions: IDisposable[];
-	workspaceState: IExtensionMemento;
-	globalState: IExtensionMemento;
-	extensionPath: string;
-	storagePath: string;
-	asAbsolutePath(relativePath: string): string;
-}
-
-export class ExtHostExtensionService extends AbstractExtensionService<ExtHostExtension> {
-
-	private _threadService: IThreadService;
-	private _storage: ExtHostStorage;
-	private _storagePath: ExtensionStoragePath;
-	private _proxy: MainProcessExtensionServiceShape;
-	private _telemetryService: ITelemetryService;
-	private _contextService: IWorkspaceContextService;
-
-	/**
-	 * This class is constructed manually because it is a service, so it doesn't use any ctor injection
-	 */
-	constructor(initData: IInitData, threadService: IThreadService, telemetryService: ITelemetryService, contextService: IWorkspaceContextService) {
-		super(false);
-		this._registry.registerExtensions(initData.extensions);
-		this._threadService = threadService;
-		this._storage = new ExtHostStorage(threadService);
-		this._storagePath = new ExtensionStoragePath(contextService, initData.environment);
-		this._proxy = this._threadService.get(MainContext.MainProcessExtensionService);
-		this._telemetryService = telemetryService;
-		this._contextService = contextService;
-
-		// initialize API first
-		const apiFactory = createApiFactory(initData, threadService, this, this._contextService, this._telemetryService);
-		initializeExtensionApi(this, apiFactory).then(() => this._triggerOnReady());
-	}
-
-	public getAllExtensionDescriptions(): IExtensionDescription[] {
-		return this._registry.getAllExtensionDescriptions();
-	}
-
-	public getExtensionDescription(extensionId: string): IExtensionDescription {
-		return this._registry.getExtensionDescription(extensionId);
-	}
-
-	public $localShowMessage(severity: Severity, msg: string): void {
-		switch (severity) {
-			case Severity.Error:
-				console.error(msg);
-				break;
-			case Severity.Warning:
-				console.warn(msg);
-				break;
-			default:
-				console.log(msg);
-		}
-	}
-
-	public get(extensionId: string): IExtensionAPI {
-		if (!hasOwnProperty.call(this._activatedExtensions, extensionId)) {
-			throw new Error('Extension `' + extensionId + '` is not known or not activated');
-		}
-		return this._activatedExtensions[extensionId].exports;
-	}
-
-	public deactivate(extensionId: string): TPromise<void> {
-		let result: TPromise<void> = TPromise.as(void 0);
-
-		let extension = this._activatedExtensions[extensionId];
-		if (!extension) {
-			return result;
-		}
-
-		// call deactivate if available
-		try {
-			if (typeof extension.module.deactivate === 'function') {
-				result = TPromise.wrap(extension.module.deactivate()).then(null, (err) => {
-					// TODO: Do something with err if this is not the shutdown case
-					return TPromise.as(void 0);
-				});
-			}
-		} catch (err) {
-			// TODO: Do something with err if this is not the shutdown case
-		}
-
-		// clean up subscriptions
-		try {
-			dispose(extension.subscriptions);
-		} catch (err) {
-			// TODO: Do something with err if this is not the shutdown case
-		}
-
-		return result;
-	}
-
-	// -- overwriting AbstractExtensionService
-
-	protected _showMessage(severity: Severity, msg: string): void {
-		this._proxy.$localShowMessage(severity, msg);
-		this.$localShowMessage(severity, msg);
-	}
-
-	protected _createFailedExtension() {
-		return new ExtHostExtension(true, { activate: undefined, deactivate: undefined }, undefined, []);
-	}
-
-	private _loadExtensionContext(extensionDescription: IExtensionDescription): TPromise<IExtensionContext> {
-
-		let globalState = new ExtensionMemento(extensionDescription.id, true, this._storage);
-		let workspaceState = new ExtensionMemento(extensionDescription.id, false, this._storage);
-
-		return TPromise.join([
-			globalState.whenReady,
-			workspaceState.whenReady,
-			this._storagePath.whenReady
-		]).then(() => {
-			return Object.freeze(<IExtensionContext>{
-				globalState,
-				workspaceState,
-				subscriptions: [],
-				get extensionPath() { return extensionDescription.extensionFolderPath; },
-				storagePath: this._storagePath.value(extensionDescription),
-				asAbsolutePath: (relativePath: string) => { return join(extensionDescription.extensionFolderPath, relativePath); }
-			});
-		});
-	}
-
-	protected _actualActivateExtension(extensionDescription: IExtensionDescription): TPromise<ActivatedExtension> {
-		return this._doActualActivateExtension(extensionDescription).then((activatedExtension) => {
-			this._proxy.$onExtensionActivated(extensionDescription.id);
-			return activatedExtension;
-		}, (err) => {
-			this._proxy.$onExtensionActivationFailed(extensionDescription.id);
-			throw err;
-		});
-	}
-
-	private _doActualActivateExtension(extensionDescription: IExtensionDescription): TPromise<ExtHostExtension> {
-		let event = getTelemetryActivationEvent(extensionDescription);
-		this._telemetryService.publicLog('activatePlugin', event);
-		if (!extensionDescription.main) {
-			// Treat the extension as being empty => NOT AN ERROR CASE
-			return TPromise.as(new ExtHostEmptyExtension());
-		}
-		return this.onReady().then(() => {
-			return TPromise.join<any>([
-				loadCommonJSModule(extensionDescription.main),
-				this._loadExtensionContext(extensionDescription)
-			]).then(values => {
-				return ExtHostExtensionService._callActivate(<IExtensionModule>values[0], <IExtensionContext>values[1]);
-			}, (errors: any[]) => {
-				// Avoid failing with an array of errors, fail with a single error
-				if (errors[0]) {
-					return TPromise.wrapError(errors[0]);
-				}
-				if (errors[1]) {
-					return TPromise.wrapError(errors[1]);
-				}
-				return undefined;
-			});
-		});
-	}
-
-	private static _callActivate(extensionModule: IExtensionModule, context: IExtensionContext): TPromise<ExtHostExtension> {
-		// Make sure the extension's surface is not undefined
-		extensionModule = extensionModule || {
-			activate: undefined,
-			deactivate: undefined
+			return that._factories.get(request)!.load(
+				request,
+				URI.file(realpathSync(parent.filename)),
+				request => originalLoad.apply(this, [request, parent, isMain])
+			);
 		};
 
-		return this._callActivateOptional(extensionModule, context).then((extensionExports) => {
-			return new ExtHostExtension(false, extensionModule, extensionExports, context.subscriptions);
-		});
-	}
+		const originalLookup = node_module._resolveLookupPaths;
+		node_module._resolveLookupPaths = (request: string, parent: unknown) => {
+			return originalLookup.call(this, applyAlternatives(request), parent);
+		};
 
-	private static _callActivateOptional(extensionModule: IExtensionModule, context: IExtensionContext): TPromise<IExtensionAPI> {
-		if (typeof extensionModule.activate === 'function') {
-			try {
-				return TPromise.as(extensionModule.activate.apply(global, [context]));
-			} catch (err) {
-				return TPromise.wrapError(err);
+		const originalResolveFilename = node_module._resolveFilename;
+		node_module._resolveFilename = function resolveFilename(request: string, parent: unknown, isMain: boolean, options?: { paths?: string[] }) {
+			if (request === 'vsda' && Array.isArray(options?.paths) && options.paths.length === 0) {
+				// ESM: ever since we moved to ESM, `require.main` will be `undefined` for extensions
+				// Some extensions have been using `require.resolve('vsda', { paths: require.main.paths })`
+				// to find the `vsda` module in our app root. To be backwards compatible with this pattern,
+				// we help by filling in the `paths` array with the node modules paths of the current module.
+				options.paths = node_module._nodeModulePaths(import.meta.dirname);
 			}
-		} else {
-			// No activate found => the module is the extension's exports
-			return TPromise.as<IExtensionAPI>(extensionModule);
-		}
+			return originalResolveFilename.call(this, request, parent, isMain, options);
+		};
+
+		const applyAlternatives = (request: string) => {
+			for (const alternativeModuleName of that._alternatives) {
+				const alternative = alternativeModuleName(request);
+				if (alternative) {
+					request = alternative;
+					break;
+				}
+			}
+			return request;
+		};
+
+		const apiInstances = new BidirectionalMap<typeof vscode, string>();
+		const apiImportDataUrl = new Map<string, string>();
+
+		// define a global function that can be used to get API instances given a random key
+		Object.defineProperty(globalThis, NodeModuleRequireInterceptor._vscodeImportFnName, {
+			enumerable: false,
+			configurable: false,
+			writable: false,
+			value: (key: string) => {
+				return apiInstances.getKey(key);
+			}
+		});
+
+		let apiModuleFactory: INodeModuleFactory | undefined;
+
+		const lookup = (url: string): string => {
+			// Get the vscode-module factory - which is the same logic that's also used by
+			// the CommonJS require interceptor
+			if (!apiModuleFactory) {
+				apiModuleFactory = this._factories.get('vscode');
+				assertType(apiModuleFactory);
+			}
+
+			const uri = URI.parse(url);
+
+			// Get or create the API instance. The interface is per extension and extensions are
+			// looked up by the uri (e.data.url) and path containment.
+			const apiInstance = apiModuleFactory.load('_not_used', uri, () => { throw new Error('CANNOT LOAD MODULE from here.'); });
+			let key = apiInstances.get(apiInstance);
+			if (!key) {
+				key = generateUuid();
+				apiInstances.set(apiInstance, key);
+			}
+
+			// Create and cache a data-url which is the import script for the API instance
+			let scriptDataUrlSrc = apiImportDataUrl.get(key);
+			if (!scriptDataUrlSrc) {
+				const jsCode = `const _vscodeInstance = globalThis.${NodeModuleRequireInterceptor._vscodeImportFnName}('${key}');\n\n${Object.keys(apiInstance).map((name => `export const ${name} = _vscodeInstance['${name}'];`)).join('\n')}`;
+				scriptDataUrlSrc = NodeModuleRequireInterceptor._createDataUri(jsCode);
+				apiImportDataUrl.set(key, scriptDataUrlSrc);
+			}
+			return scriptDataUrlSrc;
+		};
+		const hooks = nodeModule.registerHooks({
+			resolve: (specifier, context, nextResolve) => {
+				if (specifier !== 'vscode' || !context.parentURL) {
+					return nextResolve(specifier, context);
+				}
+				const otherUrl = lookup(context.parentURL);
+				return {
+					url: otherUrl,
+					shortCircuit: true,
+				};
+			},
+		});
+		this._store.add(toDisposable(() => hooks.deregister()));
 	}
-
-	// -- called by main thread
-
-	public $activateExtension(extensionDescription: IExtensionDescription): TPromise<void> {
-		return this._activateExtension(extensionDescription);
-	}
-
 }
 
-function loadCommonJSModule<T>(modulePath: string): TPromise<T> {
-	let r: T = null;
-	try {
-		r = require.__$__nodeRequire<T>(modulePath);
-	} catch (e) {
-		return TPromise.wrapError(e);
-	}
-	return TPromise.as(r);
-}
+export class ExtHostExtensionService extends AbstractExtHostExtensionService {
 
-function getTelemetryActivationEvent(extensionDescription: IExtensionDescription): any {
-	let event = {
-		id: extensionDescription.id,
-		name: extensionDescription.name,
-		publisherDisplayName: extensionDescription.publisher,
-		activationEvents: extensionDescription.activationEvents ? extensionDescription.activationEvents.join(',') : null,
-		isBuiltin: extensionDescription.isBuiltin
-	};
+	readonly extensionRuntime = ExtensionRuntime.Node;
 
-	for (let contribution in extensionDescription.contributes) {
-		let contributionDetails = extensionDescription.contributes[contribution];
+	protected async _beforeAlmostReadyToRunExtensions(): Promise<void> {
+		// make sure console.log calls make it to the render
+		this._instaService.createInstance(ExtHostConsoleForwarder);
 
-		if (!contributionDetails) {
-			continue;
+		// initialize API and register actors
+		const extensionApiFactory = this._instaService.invokeFunction(createApiFactoryAndRegisterActors);
+
+		// Register Download command
+		this._instaService.createInstance(ExtHostDownloadService);
+
+		// Register CLI Server for ipc
+		if (this._initData.remote.isRemote && this._initData.remote.authority) {
+			const cliServer = this._instaService.createInstance(CLIServer);
+			process.env['VSCODE_IPC_HOOK_CLI'] = cliServer.ipcHandlePath;
 		}
 
-		switch (contribution) {
-			case 'debuggers':
-				let types = contributionDetails.reduce((p, c) => p ? p + ',' + c['type'] : c['type'], '');
-				event['contribution.debuggers'] = types;
-				break;
-			case 'grammars':
-				let grammers = contributionDetails.reduce((p, c) => p ? p + ',' + c['language'] : c['language'], '');
-				event['contribution.grammars'] = grammers;
-				break;
-			case 'languages':
-				let languages = contributionDetails.reduce((p, c) => p ? p + ',' + c['id'] : c['id'], '');
-				event['contribution.languages'] = languages;
-				break;
-			case 'tmSnippets':
-				let tmSnippets = contributionDetails.reduce((p, c) => p ? p + ',' + c['languageId'] : c['languageId'], '');
-				event['contribution.tmSnippets'] = tmSnippets;
-				break;
-			default:
-				event[`contribution.${contribution}`] = true;
+		// Register local file system shortcut
+		this._instaService.createInstance(ExtHostDiskFileSystemProvider);
+
+		// Module loading tricks based on `module._load`.
+		// `module._load` intercepts `require(...)`.
+		// Module loading tricks based on `module.registerHooks`.
+		// `module.registerHooks` is a generic interceptor that intercepts `require(...)`, `import ...`, and `import(...)`.
+		await this._store.add(this._instaService.createInstance(NodeModuleRequireInterceptor, extensionApiFactory, { mine: this._myRegistry, all: this._globalRegistry }))
+			.install();
+
+		performance.mark('code/extHost/didInitAPI');
+
+		// Do this when extension service exists, but extensions are not being activated yet.
+		const configProvider = await this._extHostConfiguration.getConfigProvider();
+		await connectProxyResolver(this._extHostWorkspace, configProvider, this, this._logService, this._mainThreadTelemetryProxy, this._initData, this._store);
+		performance.mark('code/extHost/didInitProxyResolver');
+	}
+
+	protected _getEntryPoint(extensionDescription: IExtensionDescription): string | undefined {
+		return extensionDescription.main;
+	}
+
+	private async _doLoadModule<T>(extension: IExtensionDescription | null, module: URI, activationTimesBuilder: ExtensionActivationTimesBuilder, mode: 'esm' | 'cjs'): Promise<T> {
+		if (module.scheme !== Schemas.file) {
+			throw new Error(`Cannot load URI: '${module}', must be of file-scheme`);
+		}
+		let r: T | null = null;
+		activationTimesBuilder.codeLoadingStart();
+		this._logService.trace(`ExtensionService#loadModule [${mode}] -> ${module.toString(true)}`);
+		this._logService.flush();
+		const extensionId = extension?.identifier.value;
+		if (extension) {
+			await this._extHostLocalizationService.initializeLocalizedMessages(extension);
+		}
+		try {
+			if (extensionId) {
+				performance.mark(`code/extHost/willLoadExtensionCode/${extensionId}`);
+			}
+			if (mode === 'esm') {
+				r = <T>await import(module.toString(true));
+			} else {
+				r = <T>require(module.fsPath);
+			}
+		} finally {
+			if (extensionId) {
+				performance.mark(`code/extHost/didLoadExtensionCode/${extensionId}`);
+			}
+			activationTimesBuilder.codeLoadingStop();
+		}
+		return r;
+	}
+
+	protected async _loadCommonJSModule<T>(extension: IExtensionDescription | null, module: URI, activationTimesBuilder: ExtensionActivationTimesBuilder): Promise<T> {
+		return this._doLoadModule<T>(extension, module, activationTimesBuilder, 'cjs');
+	}
+
+	protected async _loadESMModule<T>(extension: IExtensionDescription | null, module: URI, activationTimesBuilder: ExtensionActivationTimesBuilder): Promise<T> {
+		return this._doLoadModule<T>(extension, module, activationTimesBuilder, 'esm');
+	}
+
+	public async $setRemoteEnvironment(env: { [key: string]: string | null }): Promise<void> {
+		if (!this._initData.remote.isRemote) {
+			return;
+		}
+
+		for (const key in env) {
+			const value = env[key];
+			if (value === null) {
+				delete process.env[key];
+			} else {
+				process.env[key] = value;
+			}
 		}
 	}
 
-	return event;
+	protected override _onEagerExtensionsActivated(): void {
+		markNodeCompileCacheReady(message => this._logService.info(message));
+	}
 }

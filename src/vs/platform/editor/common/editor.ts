@@ -2,43 +2,70 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import URI from 'vs/base/common/uri';
-import { TPromise } from 'vs/base/common/winjs.base';
-import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import Event from 'vs/base/common/event';
-import { IDisposable } from 'vs/base/common/lifecycle';
-import { IEditorViewState } from 'vs/editor/common/editorCommon';
+import { equals } from '../../../base/common/arrays.js';
+import { Event } from '../../../base/common/event.js';
+import { IDisposable } from '../../../base/common/lifecycle.js';
+import { URI } from '../../../base/common/uri.js';
+import { IContextKeyService } from '../../contextkey/common/contextkey.js';
+import { IUriIdentityService } from '../../uriIdentity/common/uriIdentity.js';
+import { IRectangle } from '../../window/common/window.js';
 
-export const IEditorService = createDecorator<IEditorService>('editorService');
-
-export interface IEditorService {
-
-	_serviceBrand: any;
+export interface IResolvableEditorModel extends IDisposable {
 
 	/**
-	 * Specific overload to open an instance of IResourceInput.
+	 * Resolves the model.
 	 */
-	openEditor(input: IResourceInput, sideBySide?: boolean): TPromise<IEditor>;
+	resolve(): Promise<void>;
+
+	/**
+	 * Find out if the editor model was resolved or not.
+	 */
+	isResolved(): boolean;
 }
 
-export interface IEditorModel {
+export function isResolvedEditorModel(model: IDisposable | undefined | null): model is IResolvableEditorModel {
+	const candidate = model as IResolvableEditorModel | undefined | null;
 
-	onDispose: Event<void>;
-
-	/**
-	 * Loads the model.
-	 */
-	load(): TPromise<IEditorModel>;
-
-	/**
-	 * Dispose associated resources
-	 */
-	dispose(): void;
+	return typeof candidate?.resolve === 'function'
+		&& typeof candidate?.isResolved === 'function';
 }
 
-export interface IBaseResourceInput {
+export interface IBaseUntypedEditorInput {
+
+	/**
+	 * Optional options to use when opening the input.
+	 */
+	options?: IEditorOptions;
+
+	/**
+	 * Label to show for the input.
+	 */
+	readonly label?: string;
+
+	/**
+	 * Description to show for the input.
+	 */
+	readonly description?: string;
+}
+
+export interface IBaseResourceEditorInput extends IBaseUntypedEditorInput {
+
+	/**
+	 * Hint to indicate that this input should be treated as a
+	 * untitled file.
+	 *
+	 * Without this hint, the editor service will make a guess by
+	 * looking at the scheme of the resource(s).
+	 *
+	 * Use `forceUntitled: true` when you pass in a `resource` that
+	 * does not use the `untitled` scheme. The `resource` will then
+	 * be used as associated path when saving the untitled file.
+	 */
+	readonly forceUntitled?: boolean;
+}
+
+export interface IBaseTextResourceEditorInput extends IBaseResourceEditorInput {
 
 	/**
 	 * Optional options to use when opening the text input.
@@ -46,184 +73,173 @@ export interface IBaseResourceInput {
 	options?: ITextEditorOptions;
 
 	/**
-	 * Label to show for the diff editor
+	 * The contents of the text input if known. If provided,
+	 * the input will not attempt to load the contents from
+	 * disk and may appear dirty.
 	 */
-	label?: string;
-
-	/**
-	 * Description to show for the diff editor
-	 */
-	description?: string;
-}
-
-export interface IResourceInput extends IBaseResourceInput {
-
-	/**
-	 * The resource URL of the resource to open.
-	 */
-	resource: URI;
+	contents?: string;
 
 	/**
 	 * The encoding of the text input if known.
 	 */
 	encoding?: string;
+
+	/**
+	 * The identifier of the language id of the text input
+	 * if known to use when displaying the contents.
+	 */
+	languageId?: string;
 }
 
-export interface IResourceDiffInput extends IBaseResourceInput {
+export interface IResourceEditorInput extends IBaseResourceEditorInput {
 
 	/**
-	 * The left hand side URI to open inside a diff editor.
+	 * The resource URI of the resource to open.
 	 */
-	leftResource: URI;
-
-	/**
-	 * The right hand side URI to open inside a diff editor.
-	 */
-	rightResource: URI;
+	readonly resource: URI;
 }
 
-export interface IResourceSideBySideInput extends IBaseResourceInput {
+export interface ITextResourceEditorInput extends IResourceEditorInput, IBaseTextResourceEditorInput {
 
 	/**
-	 * The right hand side URI to open inside a side by side editor.
+	 * Optional options to use when opening the text input.
 	 */
-	masterResource: URI;
-
-	/**
-	 * The left hand side URI to open inside a side by side editor.
-	 */
-	detailResource: URI;
-}
-
-export interface IEditorControl {
-
-}
-
-export interface IEditor {
-
-	/**
-	 * The assigned input of this editor.
-	 */
-	input: IEditorInput;
-
-	/**
-	 * The assigned options of this editor.
-	 */
-	options: IEditorOptions;
-
-	/**
-	 * The assigned position of this editor.
-	 */
-	position: Position;
-
-	/**
-	 * Returns the unique identifier of this editor.
-	 */
-	getId(): string;
-
-	/**
-	 * Returns the underlying control of this editor.
-	 */
-	getControl(): IEditorControl;
-
-	/**
-	 * Asks the underlying control to focus.
-	 */
-	focus(): void;
-
-	/**
-	 * Finds out if this editor is visible or not.
-	 */
-	isVisible(): boolean;
+	options?: ITextEditorOptions;
 }
 
 /**
- * Possible locations for opening an editor.
+ * This identifier allows to uniquely identify an editor with a
+ * resource, type and editor identifier.
  */
-export enum Position {
+export interface IResourceEditorInputIdentifier {
 
-	/** Opens the editor in the first position replacing the input currently showing */
-	ONE = 0,
+	/**
+	 * The type of the editor.
+	 */
+	readonly typeId: string;
 
-	/** Opens the editor in the second position replacing the input currently showing */
-	TWO = 1,
+	/**
+	 * The identifier of the editor if provided.
+	 */
+	readonly editorId: string | undefined;
 
-	/** Opens the editor in the third most position replacing the input currently showing */
-	THREE = 2
+	/**
+	 * The resource URI of the editor.
+	 */
+	readonly resource: URI;
 }
 
-export const POSITIONS = [Position.ONE, Position.TWO, Position.THREE];
+export enum EditorActivation {
 
-export enum Direction {
-	LEFT,
-	RIGHT
+	/**
+	 * Activate the editor after it opened. This will automatically restore
+	 * the editor if it is minimized.
+	 */
+	ACTIVATE = 1,
+
+	/**
+	 * Only restore the editor if it is minimized but do not activate it.
+	 *
+	 * Note: will only work in combination with the `preserveFocus: true` option.
+	 * Otherwise, if focus moves into the editor, it will activate and restore
+	 * automatically.
+	 */
+	RESTORE,
+
+	/**
+	 * Preserve the current active editor.
+	 *
+	 * Note: will only work in combination with the `preserveFocus: true` option.
+	 * Otherwise, if focus moves into the editor, it will activate and restore
+	 * automatically.
+	 */
+	PRESERVE
 }
 
-export enum Verbosity {
-	SHORT,
-	MEDIUM,
-	LONG
+export enum EditorResolution {
+
+	/**
+	 * Only exclusive editors are considered.
+	 *
+	 * Note: the value is non-zero so that `override` is truthy when set.
+	 */
+	EXCLUSIVE_ONLY = 1
 }
 
-export interface IEditorInput extends IDisposable {
-
-	onDispose: Event<void>;
+export enum EditorOpenSource {
 
 	/**
-	 * Returns the display name of this input.
+	 * Default: the editor is opening via a programmatic call
+	 * to the editor service API.
 	 */
-	getName(): string;
+	API,
 
 	/**
-	 * Returns the display description of this input.
+	 * Indicates that a user action triggered the opening, e.g.
+	 * via mouse or keyboard use.
 	 */
-	getDescription(verbose?: boolean): string;
+	USER
+}
 
-	/**
-	 * Returns the display title of this input.
-	 */
-	getTitle(verbosity?: Verbosity): string;
-
-	/**
-	 * Resolves the input.
-	 */
-	resolve(): TPromise<IEditorModel>;
-
-	/**
-	 * Returns if this input is dirty or not.
-	 */
-	isDirty(): boolean;
-
-	/**
-	 * Reverts this input.
-	 */
-	revert(): TPromise<boolean>;
-
-	/**
-	 * Returns if the other object matches this input.
-	 */
-	matches(other: any): boolean;
+/**
+ * An editor column or symbolic placement relative to the active editor.
+ */
+export enum ViewColumn {
+	Active = -1,
+	Beside = -2,
+	One = 1,
+	Two = 2,
+	Three = 3,
+	Four = 4,
+	Five = 5,
+	Six = 6,
+	Seven = 7,
+	Eight = 8,
+	Nine = 9
 }
 
 export interface IEditorOptions {
 
 	/**
-	 * Tells the editor to not receive keyboard focus when the editor is being opened. By default,
-	 * the editor will receive keyboard focus on open.
+	 * Tells the editor to not receive keyboard focus when the editor is being opened.
+	 *
+	 * Will also not activate the group the editor opens in unless the group is already
+	 * the active one. This behaviour can be overridden via the `activation` option.
 	 */
 	preserveFocus?: boolean;
 
 	/**
-	 * Tells the editor to replace the editor input in the editor even if it is identical to the one
-	 * already showing. By default, the editor will not replace the input if it is identical to the
+	 * This option is only relevant if an editor is opened into a group that is not active
+	 * already and allows to control if the inactive group should become active, restored
+	 * or preserved.
+	 *
+	 * By default, the editor group will become active unless `preserveFocus` or `inactive`
+	 * is specified.
+	 */
+	activation?: EditorActivation;
+
+	/**
+	 * Tells the editor to reload the editor input in the editor even if it is identical to the one
+	 * already showing. By default, the editor will not reload the input if it is identical to the
 	 * one showing.
 	 */
-	forceOpen?: boolean;
+	forceReload?: boolean;
 
 	/**
 	 * Will reveal the editor if it is already opened and visible in any of the opened editor groups.
+	 *
+	 * Note that this option is just a hint that might be ignored if the user wants to open an editor explicitly
+	 * to the side of another one or into a specific editor group.
 	 */
 	revealIfVisible?: boolean;
+
+	/**
+	 * Will reveal the editor if it is already opened (even when not visible) in any of the opened editor groups.
+	 *
+	 * Note that this option is just a hint that might be ignored if the user wants to open an editor explicitly
+	 * to the side of another one or into a specific editor group.
+	 */
+	revealIfOpened?: boolean;
 
 	/**
 	 * An editor that is pinned remains in the editor stack even when another editor is being opened.
@@ -232,15 +248,291 @@ export interface IEditorOptions {
 	pinned?: boolean;
 
 	/**
+	 * An editor that is sticky moves to the beginning of the editors list within the group and will remain
+	 * there unless explicitly closed. Operations such as "Close All" will not close sticky editors.
+	 */
+	sticky?: boolean;
+
+	/**
 	 * The index in the document stack where to insert the editor into when opening.
 	 */
 	index?: number;
 
 	/**
 	 * An active editor that is opened will show its contents directly. Set to true to open an editor
-	 * in the background.
+	 * in the background without loading its contents.
+	 *
+	 * Will also not activate the group the editor opens in unless the group is already
+	 * the active one. This behaviour can be overridden via the `activation` option.
 	 */
 	inactive?: boolean;
+
+	/**
+	 * In case of an error opening the editor, will not present this error to the user (e.g. by showing
+	 * a generic placeholder in the editor area). So it is up to the caller to provide error information
+	 * in that case.
+	 *
+	 * By default, an error when opening an editor will result in a placeholder editor that shows the error.
+	 * In certain cases a modal dialog may be presented to ask the user for further action.
+	 */
+	ignoreError?: boolean;
+
+	/**
+	 * Allows to override the editor that should be used to display the input:
+	 * - `undefined`: let the editor decide for itself
+	 * - `string`: specific override by id
+	 * - `EditorResolution`: specific override handling
+	 */
+	override?: string | EditorResolution;
+
+	/**
+	 * A optional hint to signal in which context the editor opens.
+	 *
+	 * If configured to be `EditorOpenSource.USER`, this hint can be
+	 * used in various places to control the experience. For example,
+	 * if the editor to open fails with an error, a notification could
+	 * inform about this in a modal dialog. If the editor opened through
+	 * some background task, the notification would show in the background,
+	 * not as a modal dialog.
+	 */
+	source?: EditorOpenSource;
+
+	/**
+	 * Indicates whether the editor is being opened due to an explicit user
+	 * action (`true`) or automatically (`false`) as a side effect of another
+	 * action (e.g. the chat agent opening files it has edited).
+	 *
+	 * When omitted, callers should be treated as explicit. Layout logic may
+	 * use this to decide whether to react to the visibility change (for
+	 * example, by leaving the auxiliary side bar maximized when the change
+	 * was not initiated by the user).
+	 */
+	isExplicit?: boolean;
+
+	/**
+	 * An optional property to signal that certain view state should be
+	 * applied when opening the editor.
+	 */
+	viewState?: object;
+
+	/**
+	 * A transient editor will attempt to appear as preview and certain components
+	 * (such as history tracking) may decide to ignore the editor when it becomes
+	 * active.
+	 * This option is meant to be used only when the editor is used for a short
+	 * period of time, for example when opening a preview of the editor from a
+	 * picker control in the background while navigating through results of the picker.
+	 *
+	 * Note: an editor that is already opened in a group that is not transient, will
+	 * not turn transient.
+	 */
+	transient?: boolean;
+
+	/**
+	 * Options that only apply when `AUX_WINDOW_GROUP` is used for opening.
+	 */
+	auxiliary?: {
+
+		/**
+		 * Define the bounds of the editor window.
+		 */
+		bounds?: Partial<IRectangle>;
+
+		/**
+		 * Show editor compact, hiding unnecessary elements.
+		 */
+		compact?: boolean;
+
+		/**
+		 * Show the editor always on top of other windows.
+		 */
+		alwaysOnTop?: boolean;
+	};
+
+	/**
+	 * Options that only apply when `MODAL_GROUP` is used for opening.
+	 */
+	modal?: IModalEditorPartOptions;
+}
+
+export interface IModalEditorPartOptions {
+
+	/**
+	 * Whether the modal editor should be maximized.
+	 */
+	readonly maximized?: boolean;
+
+	/**
+	 * Size of the modal editor part unless it is maximized.
+	 */
+	readonly size?: { readonly width: number; readonly height: number };
+
+	/**
+	 * Position of the modal editor part unless it is maximized.
+	 */
+	readonly position?: { readonly left: number; readonly top: number };
+
+	/**
+	 * The navigation context for navigating between items
+	 * within this modal editor. Pass `undefined` to clear.
+	 */
+	readonly navigation?: IModalEditorNavigation;
+
+	/**
+	 * Optional sidebar content to render on the left side of the
+	 * modal editor. The caller provides a render callback that
+	 * receives a container element and a layout callback, and
+	 * returns a disposable to clean up when the modal closes.
+	 *
+	 * Note: the sidebar will only be shown when provided during
+	 * opening and cannot currently be added, removed, or updated
+	 * after the modal editor is opened.
+	 */
+	readonly sidebar?: IModalEditorSidebar;
+}
+
+/**
+ * Per-editor modal options provided by an editor input that wants to influence
+ * how it is rendered inside the modal editor part. Unlike
+ * {@link IModalEditorPartOptions}, these options are scoped to a single editor
+ * and resolved from the active editor (not from the part-level options API).
+ */
+export interface IModalEditorOptions {
+
+	/**
+	 * When true, the modal editor renders a simplified header:
+	 * uses the editor background, hides the title icon, removes the
+	 * bottom border and uses a slightly taller fixed height. Useful
+	 * for editors that provide their own header chrome.
+	 */
+	readonly compactHeader?: boolean;
+
+	/**
+	 * Whether the modal editor can be moved into an editor area.
+	 */
+	readonly canMoveToEditorArea?: boolean;
+}
+
+/**
+ * Marker interface for editor inputs that want to customize how they are
+ * rendered when opened in the modal editor part (see {@link IModalEditorOptions}).
+ */
+export interface IModalEditorOptionsProvider {
+	getModalEditorOptions(): IModalEditorOptions | undefined;
+}
+
+export function isModalEditorOptionsProvider(obj: unknown): obj is IModalEditorOptionsProvider {
+	return !!obj && typeof (obj as IModalEditorOptionsProvider).getModalEditorOptions === 'function';
+}
+
+export function canMoveModalEditorToEditorArea(obj: unknown): boolean {
+	return !isModalEditorOptionsProvider(obj) || obj.getModalEditorOptions()?.canMoveToEditorArea !== false;
+}
+
+/**
+ * Modal sidebar supports rendering custom content in a sidebar next to the main editor content.
+ */
+export interface IModalEditorSidebar {
+
+	/**
+	 * Sidebar width set by the user via resizing, if any.
+	 */
+	readonly sidebarWidth?: number;
+
+	/**
+	 * Whether the sidebar is hidden.
+	 */
+	readonly sidebarHidden?: boolean;
+
+	/**
+	 * Render the sidebar content into the given container.
+	 *
+	 * @param container The DOM element to render into.
+	 * @param onDidLayout An event that fires when the sidebar is
+	 * 		laid out with the available dimensions.
+	 * @param contextKeyService A context key service scoped to the modal
+	 * 		that content should descend from (e.g. when creating lists/trees)
+	 * 		so that modal-level context keys remain active while the content
+	 * 		has focus.
+	 * @returns A disposable to clean up when the modal closes.
+	 */
+	readonly render: (container: unknown /* HTMLElement */, onDidLayout: Event<{ readonly height: number; readonly width: number }>, contextKeyService: IContextKeyService) => IDisposable;
+}
+
+/**
+ * Context for navigating between items within a modal editor.
+ */
+export interface IModalEditorNavigation {
+
+	/**
+	 * Total number of items in the navigation list.
+	 */
+	readonly total: number;
+
+	/**
+	 * Current 0-based index in the navigation list.
+	 */
+	readonly current: number;
+
+	/**
+	 * Navigate to the item at the given 0-based index.
+	 */
+	readonly navigate: (index: number) => void;
+}
+
+export interface ITextEditorSelection {
+	readonly startLineNumber: number;
+	readonly startColumn: number;
+	readonly endLineNumber?: number;
+	readonly endColumn?: number;
+}
+
+export const enum TextEditorSelectionRevealType {
+	/**
+	 * Option to scroll vertically or horizontally as necessary and reveal a range centered vertically.
+	 */
+	Center = 0,
+
+	/**
+	 * Option to scroll vertically or horizontally as necessary and reveal a range centered vertically only if it lies outside the viewport.
+	 */
+	CenterIfOutsideViewport = 1,
+
+	/**
+	 * Option to scroll vertically or horizontally as necessary and reveal a range close to the top of the viewport, but not quite at the top.
+	 */
+	NearTop = 2,
+
+	/**
+	 * Option to scroll vertically or horizontally as necessary and reveal a range close to the top of the viewport, but not quite at the top.
+	 * Only if it lies outside the viewport
+	 */
+	NearTopIfOutsideViewport = 3,
+}
+
+export const enum TextEditorSelectionSource {
+
+	/**
+	 * Programmatic source indicates a selection change that
+	 * was not triggered by the user via keyboard or mouse
+	 * but through text editor APIs.
+	 */
+	PROGRAMMATIC = 'api',
+
+	/**
+	 * Navigation source indicates a selection change that
+	 * was caused via some command or UI component such as
+	 * an outline tree.
+	 */
+	NAVIGATION = 'code.navigation',
+
+	/**
+	 * Jump source indicates a selection change that
+	 * was caused from within the text editor to another
+	 * location in the same or different text editor such
+	 * as "Go to definition".
+	 */
+	JUMP = 'code.jump'
 }
 
 export interface ITextEditorOptions extends IEditorOptions {
@@ -248,20 +540,42 @@ export interface ITextEditorOptions extends IEditorOptions {
 	/**
 	 * Text editor selection.
 	 */
-	selection?: {
-		startLineNumber: number;
-		startColumn: number;
-		endLineNumber?: number;
-		endColumn?: number;
-	};
+	selection?: ITextEditorSelection;
 
 	/**
-	 * Text editor view state.
+	 * Option to control the text editor selection reveal type.
+	 * Defaults to TextEditorSelectionRevealType.Center
 	 */
-	viewState?: IEditorViewState;
+	selectionRevealType?: TextEditorSelectionRevealType;
 
 	/**
-	 * Option to scroll vertically or horizontally as necessary and reveal a range centered vertically only if it lies outside the viewport.
+	 * Source of the call that caused the selection.
 	 */
-	revealInCenterIfOutsideViewport?: boolean;
+	selectionSource?: TextEditorSelectionSource | string;
+}
+
+export type ITextEditorChange = [
+	originalStartLineNumber: number,
+	originalEndLineNumberExclusive: number,
+	modifiedStartLineNumber: number,
+	modifiedEndLineNumberExclusive: number
+];
+
+export interface ITextEditorDiffInformation {
+	readonly documentVersion: number;
+	readonly original: URI | undefined;
+	readonly modified: URI;
+	readonly changes: readonly ITextEditorChange[];
+}
+
+export function isTextEditorDiffInformationEqual(
+	uriIdentityService: IUriIdentityService,
+	diff1: ITextEditorDiffInformation | undefined,
+	diff2: ITextEditorDiffInformation | undefined): boolean {
+	return diff1?.documentVersion === diff2?.documentVersion &&
+		uriIdentityService.extUri.isEqual(diff1?.original, diff2?.original) &&
+		uriIdentityService.extUri.isEqual(diff1?.modified, diff2?.modified) &&
+		equals<ITextEditorChange>(diff1?.changes, diff2?.changes, (a, b) => {
+			return a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3];
+		});
 }

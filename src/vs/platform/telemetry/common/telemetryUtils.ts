@@ -2,336 +2,514 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import { TPromise } from 'vs/base/common/winjs.base';
-import { IDisposable } from 'vs/base/common/lifecycle';
-import { guessMimeTypes } from 'vs/base/common/mime';
-import paths = require('vs/base/common/paths');
-import URI from 'vs/base/common/uri';
-import { ConfigurationSource, IConfigurationService } from 'vs/platform/configuration/common/configuration';
-import { IKeybindingService, KeybindingSource } from 'vs/platform/keybinding/common/keybinding';
-import { ILifecycleService, ShutdownReason } from 'vs/platform/lifecycle/common/lifecycle';
-import { IStorageService } from 'vs/platform/storage/common/storage';
-import { IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
-import { ITelemetryService, ITelemetryExperiments, ITelemetryInfo, ITelemetryData } from 'vs/platform/telemetry/common/telemetry';
-import { ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
-import { StorageService } from 'vs/platform/storage/common/storageService';
-import * as objects from 'vs/base/common/objects';
+import { cloneAndChange, safeStringify } from '../../../base/common/objects.js';
+import { isObject } from '../../../base/common/types.js';
+import { URI } from '../../../base/common/uri.js';
+import { localize } from '../../../nls.js';
+import { IConfigurationService } from '../../configuration/common/configuration.js';
+import { IEnvironmentService } from '../../environment/common/environment.js';
+import { LoggerGroup } from '../../log/common/log.js';
+import { IProductService } from '../../product/common/productService.js';
+import { getRemoteName } from '../../remote/common/remoteHosts.js';
+import { verifyMicrosoftInternalDomain } from './commonProperties.js';
+import { ICustomEndpointTelemetryService, ITelemetryData, ITelemetryEndpoint, ITelemetryService, TelemetryConfiguration, TelemetryLevel, TELEMETRY_CRASH_REPORTER_SETTING_ID, TELEMETRY_OLD_SETTING_ID, TELEMETRY_SETTING_ID } from './telemetry.js';
 
-export const defaultExperiments: ITelemetryExperiments = {
-	showNewUserWatermark: false,
-	openUntitledFile: true,
-	enableWelcomePage: true,
-	reorderQuickLinks: false,
-};
+/**
+ * A special class used to denoting a telemetry value which should not be clean.
+ * This is because that value is "Trusted" not to contain identifiable information such as paths.
+ * NOTE: This is used as an API type as well, and should not be changed.
+ */
+export class TelemetryTrustedValue<T> {
+	// This is merely used as an identifier as the instance will be lost during serialization over the exthost
+	public readonly isTrustedTelemetryValue = true;
+	constructor(public readonly value: T) { }
+}
 
-export const NullTelemetryService = {
-	_serviceBrand: undefined,
-	_experiments: defaultExperiments,
-	publicLog(eventName: string, data?: ITelemetryData) {
-		return TPromise.as<void>(null);
-	},
-	isOptedIn: true,
-	getTelemetryInfo(): TPromise<ITelemetryInfo> {
-		return TPromise.as({
-			instanceId: 'someValue.instanceId',
-			sessionId: 'someValue.sessionId',
-			machineId: 'someValue.machineId'
-		});
-	},
-	getExperiments(): ITelemetryExperiments {
-		return this._experiments;
-	}
-};
+export class NullTelemetryServiceShape implements ITelemetryService {
+	declare readonly _serviceBrand: undefined;
+	readonly telemetryLevel = TelemetryLevel.NONE;
+	readonly sessionId = 'someValue.sessionId';
+	readonly machineId = 'someValue.machineId';
+	readonly sqmId = 'someValue.sqmId';
+	readonly devDeviceId = 'someValue.devDeviceId';
+	readonly firstSessionDate = 'someValue.firstSessionDate';
+	readonly sendErrorTelemetry = false;
+	publicLog() { }
+	publicLog2() { }
+	publicLogError() { }
+	publicLogError2() { }
+	setExperimentProperty() { }
+	setCommonProperty() { }
+}
 
-export function loadExperiments(accessor: ServicesAccessor): ITelemetryExperiments {
-	const contextService = accessor.get(IWorkspaceContextService);
-	const storageService = accessor.get(IStorageService);
-	const configurationService = accessor.get(IConfigurationService);
+export const NullTelemetryService = new NullTelemetryServiceShape();
 
-	updateExperimentsOverrides(configurationService);
-	configurationService.onDidUpdateConfiguration(e => updateExperimentsOverrides(configurationService));
+export class NullEndpointTelemetryService implements ICustomEndpointTelemetryService {
+	_serviceBrand: undefined;
 
-	let {
-		showNewUserWatermark,
-		openUntitledFile,
-		enableWelcomePage,
-		reorderQuickLinks,
-	} = splitExperimentsRandomness();
-
-	const newUserDuration = 24 * 60 * 60 * 1000;
-	const firstSessionDate = storageService.get('telemetry.firstSessionDate');
-	const isNewUser = !firstSessionDate || Date.now() - Date.parse(firstSessionDate) < newUserDuration;
-	if (!isNewUser || contextService.hasWorkspace()) {
-		showNewUserWatermark = defaultExperiments.showNewUserWatermark;
-		openUntitledFile = defaultExperiments.openUntitledFile;
+	async publicLog(_endpoint: ITelemetryEndpoint, _eventName: string, _data?: ITelemetryData): Promise<void> {
+		// noop
 	}
 
-	return applyOverrides({
-		showNewUserWatermark,
-		openUntitledFile,
-		enableWelcomePage,
-		reorderQuickLinks,
-	});
-}
-
-export function isWelcomePageEnabled() {
-	const overrides = getExperimentsOverrides();
-	return 'enableWelcomePage' in overrides ? overrides.enableWelcomePage : splitExperimentsRandomness().enableWelcomePage;
-}
-
-function applyOverrides(experiments: ITelemetryExperiments): ITelemetryExperiments {
-	const experimentsConfig = getExperimentsOverrides();
-	Object.keys(experiments).forEach(key => {
-		if (key in experimentsConfig) {
-			experiments[key] = experimentsConfig[key];
-		}
-	});
-	return experiments;
-}
-
-function splitExperimentsRandomness(): ITelemetryExperiments {
-	const random1 = getExperimentsRandomness();
-	const [random2, showNewUserWatermark] = splitRandom(random1);
-	const [random3, openUntitledFile] = splitRandom(random2);
-	const [random4, reorderQuickLinks] = splitRandom(random3);
-	const [, enableWelcomePage] = splitRandom(random4);
-	return {
-		showNewUserWatermark,
-		openUntitledFile,
-		enableWelcomePage,
-		reorderQuickLinks,
-	};
-}
-
-function getExperimentsRandomness() {
-	const key = StorageService.GLOBAL_PREFIX + 'experiments.randomness';
-	let valueString = window.localStorage.getItem(key);
-	if (!valueString) {
-		valueString = Math.random().toString();
-		window.localStorage.setItem(key, valueString);
-	}
-
-	return parseFloat(valueString);
-}
-
-function splitRandom(random: number): [number, boolean] {
-	const scaled = random * 2;
-	const i = Math.floor(scaled);
-	return [scaled - i, i === 1];
-}
-
-const experimentsOverridesKey = StorageService.GLOBAL_PREFIX + 'experiments.overrides';
-
-function getExperimentsOverrides(): ITelemetryExperiments {
-	const valueString = window.localStorage.getItem(experimentsOverridesKey);
-	return valueString ? JSON.parse(valueString) : <any>{};
-}
-
-function updateExperimentsOverrides(configurationService: IConfigurationService) {
-	const storageOverrides = getExperimentsOverrides();
-	const config: any = configurationService.getConfiguration('telemetry');
-	const configOverrides = config && config.experiments || {};
-	if (!objects.equals(storageOverrides, configOverrides)) {
-		window.localStorage.setItem(experimentsOverridesKey, JSON.stringify(configOverrides));
+	async publicLogError(_endpoint: ITelemetryEndpoint, _errorEventName: string, _data?: ITelemetryData): Promise<void> {
+		// noop
 	}
 }
+
+export const telemetryLogId = 'telemetry';
+export const TelemetryLogGroup: LoggerGroup = { id: telemetryLogId, name: localize('telemetryLogName', "Telemetry") };
 
 export interface ITelemetryAppender {
-	log(eventName: string, data: any): void;
+	log(eventName: string, data: ITelemetryData): void;
+	flush(): Promise<void>;
 }
 
-export function combinedAppender(...appenders: ITelemetryAppender[]): ITelemetryAppender {
-	return { log: (e, d) => appenders.forEach(a => a.log(e, d)) };
-}
+export const NullAppender: ITelemetryAppender = { log: () => null, flush: () => Promise.resolve(undefined) };
 
-export const NullAppender: ITelemetryAppender = { log: () => null };
 
-// --- util
-
-export function anonymize(input: string): string {
-	if (!input) {
-		return input;
+/* __GDPR__FRAGMENT__
+	"URIDescriptor" : {
+		"mimeType" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
+		"scheme": { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
+		"ext": { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
+		"path": { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
 	}
-
-	let r = '';
-	for (let i = 0; i < input.length; i++) {
-		let ch = input[i];
-		if (ch >= '0' && ch <= '9') {
-			r += '0';
-			continue;
-		}
-		if (ch >= 'a' && ch <= 'z') {
-			r += 'a';
-			continue;
-		}
-		if (ch >= 'A' && ch <= 'Z') {
-			r += 'A';
-			continue;
-		}
-		r += ch;
-	}
-	return r;
-}
-
+*/
 export interface URIDescriptor {
 	mimeType?: string;
+	scheme?: string;
 	ext?: string;
 	path?: string;
 }
 
-export function telemetryURIDescriptor(uri: URI): URIDescriptor {
-	const fsPath = uri && uri.fsPath;
-	return fsPath ? { mimeType: guessMimeTypes(fsPath).join(', '), ext: paths.extname(fsPath), path: anonymize(fsPath) } : {};
+/**
+ * Determines whether or not we support logging telemetry.
+ * This checks if the product is capable of collecting telemetry but not whether or not it can send it
+ * For checking the user setting and what telemetry you can send please check `getTelemetryLevel`.
+ * This returns true if `--disable-telemetry` wasn't used, the product.json allows for telemetry, and we're not testing an extension
+ * If false telemetry is disabled throughout the product
+ * @param productService
+ * @param environmentService
+ * @returns false - telemetry is completely disabled, true - telemetry is logged locally, but may not be sent
+ */
+export function supportsTelemetry(productService: IProductService, environmentService: IEnvironmentService): boolean {
+	// If it's OSS and telemetry isn't disabled via the CLI we will allow it for logging only purposes
+	if (!environmentService.isBuilt && !environmentService.disableTelemetry) {
+		return true;
+	}
+	return !(environmentService.disableTelemetry || !productService.enableTelemetry);
 }
 
 /**
- * Only add settings that cannot contain any personal/private information of users (PII).
+ * Checks to see if we're in logging only mode to debug telemetry.
+ * This is if telemetry is enabled and we're in OSS, but no telemetry key is provided so it's not being sent just logged.
+ * @param productService
+ * @param environmentService
+ * @returns True if telemetry is actually disabled and we're only logging for debug purposes
  */
-const configurationValueWhitelist = [
-	'window.zoomLevel',
-	'editor.fontSize',
-	'editor.fontFamily',
-	'editor.tabSize',
-	'files.autoSave',
-	'files.hotExit',
-	'typescript.check.tscVersion',
-	'editor.renderWhitespace',
-	'editor.cursorBlinking',
-	'editor.cursorStyle',
-	'files.associations',
-	'workbench.statusBar.visible',
-	'editor.wordWrap',
-	'editor.wordWrapColumn',
-	'editor.insertSpaces',
-	'editor.renderIndentGuides',
-	'files.trimTrailingWhitespace',
-	'git.confirmSync',
-	'editor.rulers',
-	'workbench.sideBar.location',
-	'editor.fontLigatures',
-	'editor.wordWrap',
-	'editor.lineHeight',
-	'editor.detectIndentation',
-	'editor.formatOnType',
-	'editor.formatOnSave',
-	'editor.formatOnPaste',
-	'editor.dragAndDrop',
-	'window.openFilesInNewWindow',
-	'javascript.validate.enable',
-	'editor.mouseWheelZoom',
-	'editor.fontWeight',
-	'editor.scrollBeyondLastLine',
-	'editor.lineNumbers',
-	'editor.wrappingIndent',
-	'editor.renderControlCharacters',
-	'editor.autoClosingBrackets',
-	'window.reopenFolders',
-	'extensions.autoUpdate',
-	'editor.tabCompletion',
-	'files.eol',
-	'explorer.openEditors.visible',
-	'workbench.editor.enablePreview',
-	'files.autoSaveDelay',
-	'editor.roundedSelection',
-	'editor.quickSuggestions',
-	'editor.acceptSuggestionOnEnter',
-	'editor.acceptSuggestionOnCommitCharacter',
-	'workbench.editor.showTabs',
-	'files.encoding',
-	'files.autoGuessEncoding',
-	'editor.quickSuggestionsDelay',
-	'editor.snippetSuggestions',
-	'editor.selectionHighlight',
-	'editor.occurrencesHighlight',
-	'editor.glyphMargin',
-	'editor.wordSeparators',
-	'editor.mouseWheelScrollSensitivity',
-	'editor.suggestOnTriggerCharacters',
-	'git.enabled',
-	'http.proxyStrictSSL',
-	'terminal.integrated.fontFamily',
-	'editor.overviewRulerLanes',
-	'editor.overviewRulerBorder',
-	'editor.wordBasedSuggestions',
-	'editor.hideCursorInOverviewRuler',
-	'editor.trimAutoWhitespace',
-	'editor.folding',
-	'editor.matchBrackets',
-	'workbench.editor.enablePreviewFromQuickOpen',
-	'php.builtInCompletions.enable',
-	'php.validate.enable',
-	'php.validate.run',
-	'editor.parameterHints',
-	'workbench.welcome.enabled',
+export function isLoggingOnly(productService: IProductService, environmentService: IEnvironmentService): boolean {
+	// If we're testing an extension, log telemetry for debug purposes
+	if (environmentService.extensionTestsLocationURI) {
+		return true;
+	}
+	// Logging only mode is only for OSS
+	if (environmentService.isBuilt) {
+		return false;
+	}
+
+	if (environmentService.disableTelemetry) {
+		return false;
+	}
+
+	if (productService.enableTelemetry && productService.aiConfig?.ariaKey) {
+		return false;
+	}
+
+	return true;
+}
+
+/**
+ * Determines how telemetry is handled based on the user's configuration.
+ *
+ * @param configurationService
+ * @returns OFF, ERROR, ON
+ */
+export function getTelemetryLevel(configurationService: IConfigurationService): TelemetryLevel {
+	const newConfig = configurationService.getValue<TelemetryConfiguration>(TELEMETRY_SETTING_ID);
+	const crashReporterConfig = configurationService.getValue<boolean | undefined>(TELEMETRY_CRASH_REPORTER_SETTING_ID);
+	const oldConfig = configurationService.getValue<boolean | undefined>(TELEMETRY_OLD_SETTING_ID);
+
+	// If `telemetry.enableCrashReporter` is false or `telemetry.enableTelemetry' is false, disable telemetry
+	if (oldConfig === false || crashReporterConfig === false) {
+		return TelemetryLevel.NONE;
+	}
+
+	// Maps new telemetry setting to a telemetry level
+	switch (newConfig === undefined ? TelemetryConfiguration.ON : newConfig) {
+		case TelemetryConfiguration.ON:
+			return TelemetryLevel.USAGE;
+		case TelemetryConfiguration.ERROR:
+			return TelemetryLevel.ERROR;
+		case TelemetryConfiguration.CRASH:
+			return TelemetryLevel.CRASH;
+		case TelemetryConfiguration.OFF:
+			return TelemetryLevel.NONE;
+		default:
+			return TelemetryLevel.NONE;
+	}
+}
+
+export interface Properties {
+	[key: string]: string;
+}
+
+export interface Measurements {
+	[key: string]: number;
+}
+
+export function validateTelemetryData(data?: unknown): { properties: Properties; measurements: Measurements } {
+
+	const properties: Properties = {};
+	const measurements: Measurements = {};
+
+	const flat: Record<string, unknown> = {};
+	flatten(data, flat);
+
+	for (let prop in flat) {
+		// enforce property names less than 150 char, take the last 150 char
+		prop = prop.length > 150 ? prop.substr(prop.length - 149) : prop;
+		const value = flat[prop];
+
+		if (typeof value === 'number') {
+			measurements[prop] = value;
+
+		} else if (typeof value === 'boolean') {
+			measurements[prop] = value ? 1 : 0;
+
+		} else if (typeof value === 'string') {
+			if (value.length > 8192) {
+				console.warn(`Telemetry property: ${prop} has been trimmed to 8192, the original length is ${value.length}`);
+			}
+			//enforce property value to be less than 8192 char, take the first 8192 char
+			// https://docs.microsoft.com/en-us/azure/azure-monitor/app/api-custom-events-metrics#limits
+			properties[prop] = value.substring(0, 8191);
+
+		} else if (typeof value !== 'undefined' && value !== null) {
+			properties[prop] = String(value);
+		}
+	}
+
+	return {
+		properties,
+		measurements
+	};
+}
+
+interface IRemoteAuthoringConfig {
+	remoteExtensionTips?: { readonly [remoteName: string]: unknown };
+	virtualWorkspaceExtensionTips?: { readonly [remoteName: string]: unknown };
+}
+
+export function cleanRemoteAuthority(remoteAuthority: string | undefined, config: IRemoteAuthoringConfig): string {
+	if (!remoteAuthority) {
+		return 'none';
+	}
+
+	const remoteName = getRemoteName(remoteAuthority);
+
+	const set1 = config?.remoteExtensionTips;
+	if (set1 && Object.prototype.hasOwnProperty.call(set1, remoteName)) {
+		return remoteName;
+	}
+
+	const set2 = config?.virtualWorkspaceExtensionTips;
+	if (set2 && Object.prototype.hasOwnProperty.call(set2, remoteName)) {
+		return remoteName;
+	}
+
+	return 'other';
+}
+
+function flatten(obj: unknown, result: Record<string, unknown>, order: number = 0, prefix?: string): void {
+	if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) {
+		return;
+	}
+
+	const source = obj as Record<string, unknown>;
+	for (const item of Object.getOwnPropertyNames(source)) {
+		const value = source[item];
+		const index = prefix ? prefix + item : item;
+
+		if (Array.isArray(value)) {
+			result[index] = safeStringify(value);
+
+		} else if (value instanceof Date) {
+			// TODO unsure why this is here and not in _getData
+			result[index] = value.toISOString();
+
+		} else if (isObject(value)) {
+			if (order < 2) {
+				flatten(value, result, order + 1, index + '.');
+			} else {
+				result[index] = safeStringify(value);
+			}
+		} else {
+			result[index] = value;
+		}
+	}
+}
+
+/**
+ * Whether or not this is an internal user
+ * @param productService The product service
+ * @param configService The config servivce
+ * @returns true if internal, false otherwise
+ */
+export function isInternalTelemetry(productService: IProductService, configService: IConfigurationService) {
+	const msftInternalDomains = productService.msftInternalDomains || [];
+	const internalTesting = configService.getValue<boolean>('telemetry.internalTesting');
+	return verifyMicrosoftInternalDomain(msftInternalDomains) || internalTesting;
+}
+
+interface IPathEnvironment {
+	appRoot: string;
+	extensionsPath: string;
+	userDataPath: string;
+	userHome: URI;
+	tmpDir: URI;
+}
+
+export function getPiiPathsFromEnvironment(paths: IPathEnvironment): string[] {
+	return [paths.appRoot, paths.extensionsPath, paths.userHome.fsPath, paths.tmpDir.fsPath, paths.userDataPath];
+}
+
+/**
+ * Returns the paths that contain user content rather than VS Code owned files.
+ * File paths beneath them are fully redacted instead of being kept relative to them.
+ */
+export function getUserContentPathsFromEnvironment(paths: Pick<IPathEnvironment, 'userHome' | 'tmpDir'>): string[] {
+	return [paths.userHome.fsPath, paths.tmpDir.fsPath];
+}
+
+//#region Telemetry Cleaning
+
+function getMatchRanges(value: string, patterns: RegExp[]): [number, number][] {
+	const ranges: [number, number][] = [];
+	for (const regexp of patterns) {
+		while (true) {
+			const result = regexp.exec(value);
+			if (!result) {
+				break;
+			}
+			ranges.push([result.index, regexp.lastIndex]);
+		}
+	}
+	return ranges;
+}
+
+/**
+ * Cleans a given stack of possible paths
+ * @param stack The stack to sanitize
+ * @param relativePathRootPatterns Patterns for roots whose descendant file paths are kept so the root can later be removed, leaving a relative path
+ * @param userContentRootPatterns Patterns for roots whose descendant file paths are always fully redacted, unless they are also beneath a relative path root
+ * @returns The cleaned stack
+ */
+function anonymizeFilePaths(stack: string, relativePathRootPatterns: RegExp[], userContentRootPatterns: RegExp[]): string {
+
+	// Fast check to see if it is a file path to avoid doing unnecessary heavy regex work
+	if (!stack || (!stack.includes('/') && !stack.includes('\\'))) {
+		return stack;
+	}
+
+	let updatedStack = stack;
+
+	const cleanUpIndexes = getMatchRanges(stack, relativePathRootPatterns);
+	const userContentIndexes = getMatchRanges(stack, userContentRootPatterns);
+
+	// Match node_modules or node_modules.asar at any position in the path, capturing the node_modules/... suffix
+	const nodeModulesRegex = /(?:^|[\\\/])((node_modules|node_modules\.asar)[\\\/].*)$/;
+	// Match VS Code extension paths:
+	// 1. User extensions: .vscode/extensions/, .vscode-insiders/extensions/, .vscode-server/extensions/, .vscode-server-insiders/extensions/, etc.
+	// 2. Built-in extensions: resources/app/extensions/
+	// Capture everything from the vscode folder or resources/app/extensions onwards
+	const vscodeExtensionsPathRegex = /^(.*?)((?:\.vscode(?:-[a-z]+)*|resources[\\\/]app)[\\\/]extensions[\\\/].*)$/i;
+	const fileRegex = /(file:\/\/)?([a-zA-Z]:(\\\\|\\|\/)|(\\\\|\\|\/))?([\w\-\._@]+(\\\\|\\|\/))+[\w\-\._@]*/g;
+	let lastIndex = 0;
+	updatedStack = '';
+
+	while (true) {
+		const result = fileRegex.exec(stack);
+		if (!result) {
+			break;
+		}
+
+		// Check to see if the any cleanupIndexes partially overlap with this match
+		const overlappingRange = cleanUpIndexes.some(([start, end]) => result.index < end && start < fileRegex.lastIndex);
+
+		// anoynimize user file paths that do not need to be retained or cleaned up.
+		if (!overlappingRange) {
+			const isUserContent = userContentIndexes.some(([start, end]) => result.index < end && start < fileRegex.lastIndex);
+			// Check if this is a VS Code extension path - if so, preserve the .vscode*/extensions/... portion
+			const vscodeExtMatch = isUserContent ? null : vscodeExtensionsPathRegex.exec(result[0]);
+			if (vscodeExtMatch) {
+				// Keep ".vscode[-variant]/extensions/extension-name/..." but redact the parent folder
+				updatedStack += stack.substring(lastIndex, result.index) + '<REDACTED: user-file-path>/' + vscodeExtMatch[2];
+			} else {
+				// Check if node_modules appears in the path — preserve node_modules/... suffix
+				const nodeModulesMatch = isUserContent ? null : nodeModulesRegex.exec(result[0]);
+				if (nodeModulesMatch) {
+					updatedStack += stack.substring(lastIndex, result.index) + '<REDACTED: user-file-path>/' + nodeModulesMatch[1];
+				} else {
+					updatedStack += stack.substring(lastIndex, result.index) + '<REDACTED: user-file-path>';
+				}
+			}
+			lastIndex = fileRegex.lastIndex;
+		}
+	}
+	if (lastIndex < stack.length) {
+		updatedStack += stack.substr(lastIndex);
+	}
+
+	return updatedStack;
+}
+
+const userDataRegexes = [
+	{ label: 'URL', regex: /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s]*/ },
+	// Also matches truncated or mistyped keys, which are still sensitive.
+	{ label: 'Google API Key', regex: /AIza[0-9A-Za-z_\-]{20,}/ },
+	{ label: 'JWT', regex: /eyJ[0eXAiOiJKV1Qi|hbGci|a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+/ },
+	{ label: 'Slack Token', regex: /xox[pbar]\-[A-Za-z0-9]/ },
+	{ label: 'GitHub Token', regex: /(gh[psuro]_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59})/ },
+	{ label: 'Generic Secret', regex: /(key|token|sig|secret|signature|password|passwd|pwd|android:value)[^a-zA-Z0-9]/i },
+	{ label: 'CLI Credentials', regex: /((login|psexec|(certutil|psexec)\.exe).{1,50}(\s-u(ser(name)?)?\s+.{3,100})?\s-(admin|user|vm|root)?p(ass(word)?)?\s+["']?[^$\-\/\s]|(^|[\s\r\n\\])net(\.exe)?.{1,5}(user\s+|share\s+\/user:| user -? secrets ? set) \s + [^ $\s \/])/ },
+	// Short password flags such as `plink -pw`, `openssl -pass`, `cmdkey /pass:`, and `sshpass -p`. MSBuild's `/p:` property flag is intentionally not matched.
+	{ label: 'CLI Password Flag', regex: /(?:^|[\s"'`])(?:--?(?:pw|pass)(?:\s+|=)|\/pass:|sshpass\s+-p\s*)["']?[^\s"'$\-]/i },
+	// `user:password` credentials passed with `-u` or `--user`, such as curl. Short options may be attached (`-uuser:password`). Numeric `uid:gid` pairs are not matched.
+	{ label: 'CLI Basic Auth', regex: /(?:^|\s)(?:-u(?:\s+|=)?|--user(?:\s+|=))["']?(?!\d+:\d+\b)[^\s:"']+:[^\s"']+/ },
+	{ label: 'Microsoft Entra ID', regex: /eyJ(?:0eXAiOiJKV1Qi|hbGci|[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+\.)/ },
+	{ label: 'Email', regex: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/ }
 ];
 
-export function configurationTelemetry(telemetryService: ITelemetryService, configurationService: IConfigurationService): IDisposable {
-	return configurationService.onDidUpdateConfiguration(event => {
-		if (event.source !== ConfigurationSource.Default) {
-			telemetryService.publicLog('updateConfiguration', {
-				configurationSource: ConfigurationSource[event.source],
-				configurationKeys: flattenKeys(event.sourceConfig)
-			});
-			telemetryService.publicLog('updateConfigurationValues', {
-				configurationSource: ConfigurationSource[event.source],
-				configurationValues: flattenValues(event.sourceConfig, configurationValueWhitelist)
-			});
+/**
+ * Matches the organization name in OneDrive for Business folders, e.g. `OneDrive - Contoso`.
+ * Folder names with spaces are not recognized by path anonymization, so the name is removed first.
+ * When followed by a path separator, the whole folder name is matched, including quotes that are
+ * valid in folder names. Otherwise matching stops at the first quote.
+ */
+const oneDriveOrganizationRegex = /OneDrive - (?:[^\\\/\r\n"<>|:*?]+(?=[\\\/])|[^\\\/\r\n"'`]+)/g;
+
+/**
+ * Redacts a value if it contains commonly leaked PII.
+ * @param value The value returned (as-is) when no PII is detected
+ * @param probe The string actually matched against the PII heuristics. Defaults
+ * to `value`; callers may pass a value that includes a trailing delimiter (e.g. a
+ * newline) so that heuristics relying on a non-alphanumeric boundary match the
+ * same way they would against the original whole string.
+ * @returns A `<REDACTED: ...>` marker if the probe matched, otherwise `value`
+ */
+function redactIfPossibleUserInfo(value: string, probe: string = value): string {
+	for (const secretRegex of userDataRegexes) {
+		if (secretRegex.regex.test(probe)) {
+			return `<REDACTED: ${secretRegex.label}>`;
 		}
+	}
+	return value;
+}
+
+/**
+ * Attempts to remove commonly leaked PII.
+ *
+ * When a match is found the check is applied per line so that a single suspicious
+ * frame (e.g. a stack frame containing a function name such as `getStorageKey`
+ * which matches the broad `Generic Secret` heuristic) only redacts that line —
+ * replacing it with a `<REDACTED: ...>` marker — instead of wiping the entire
+ * multi-line value such as a whole callstack.
+ * @param property The property whose offending lines will be replaced with a redaction marker if they contain user data
+ * @returns The new value for the property
+ */
+function removePropertiesWithPossibleUserInfo(property: string): string {
+	// If for some reason it is undefined we skip it (this shouldn't be possible);
+	if (!property) {
+		return property;
+	}
+
+	// Fast path: if nothing matches we return the value untouched without
+	// allocating. This keeps the common (no-PII) case as cheap as the previous
+	// implementation and avoids splitting potentially large callstacks.
+	let hasMatch = false;
+	for (const secretRegex of userDataRegexes) {
+		if (secretRegex.regex.test(property)) {
+			hasMatch = true;
+			break;
+		}
+	}
+	if (!hasMatch) {
+		return property;
+	}
+
+	// Single line values keep the original behavior of redacting the whole value.
+	if (!property.includes('\n')) {
+		return redactIfPossibleUserInfo(property);
+	}
+
+	// Multi-line values (e.g. callstacks) are redacted line-by-line so we only
+	// drop the offending lines and preserve the rest of the information. The
+	// newline delimiter stripped by `split` is re-appended (for every line but
+	// the last) when matching so heuristics that rely on a trailing
+	// non-alphanumeric boundary behave identically to the previous whole-string
+	// check and don't under-redact the last token of a line.
+	const lines = property.split('\n');
+	for (let i = 0; i < lines.length; i++) {
+		const probe = i < lines.length - 1 ? lines[i] + '\n' : lines[i];
+		lines[i] = redactIfPossibleUserInfo(lines[i], probe);
+	}
+	return lines.join('\n');
+}
+
+
+/**
+ * Does a best possible effort to clean a data object from any possible PII.
+ * @param data The data object to clean
+ * @param cleanUpPatterns Any additional patterns that should be removed from the data set
+ * @param relativePathRootPatterns Patterns for roots whose descendant file paths are kept relative to the root instead of being redacted. Defaults to `cleanUpPatterns`.
+ * @param userContentRootPatterns Patterns for roots whose descendant file paths are always fully redacted, unless they are also beneath a relative path root.
+ * @returns A new object with the PII removed
+ */
+export function cleanData(data: ITelemetryData | undefined, cleanUpPatterns: RegExp[], relativePathRootPatterns: RegExp[] = cleanUpPatterns, userContentRootPatterns: RegExp[] = []): Record<string, unknown> {
+	if (!data) {
+		return {};
+	}
+	return cloneAndChange(data, value => {
+
+		// If it's a trusted value it means it's okay to skip cleaning so we don't clean it
+		if (value instanceof TelemetryTrustedValue || Object.hasOwnProperty.call(value, 'isTrustedTelemetryValue')) {
+			return value.value;
+		}
+
+		// We only know how to clean strings
+		if (typeof value === 'string') {
+			let updatedProperty = value.replaceAll('%20', ' ');
+
+			if (updatedProperty.includes('OneDrive - ')) {
+				updatedProperty = updatedProperty.replace(oneDriveOrganizationRegex, 'OneDrive');
+			}
+
+			// First we anonymize any possible file paths
+			updatedProperty = anonymizeFilePaths(updatedProperty, relativePathRootPatterns, userContentRootPatterns);
+
+			// Then we do a simple regex replace with the defined patterns
+			for (const regexp of cleanUpPatterns) {
+				updatedProperty = updatedProperty.replace(regexp, '');
+			}
+
+			// Lastly, remove commonly leaked PII
+			updatedProperty = removePropertiesWithPossibleUserInfo(updatedProperty);
+
+			return updatedProperty;
+		}
+		return undefined;
 	});
 }
 
-export function lifecycleTelemetry(telemetryService: ITelemetryService, lifecycleService: ILifecycleService): IDisposable {
-	return lifecycleService.onShutdown(event => {
-		telemetryService.publicLog('shutdown', { reason: ShutdownReason[event] });
-	});
-}
-
-export function keybindingsTelemetry(telemetryService: ITelemetryService, keybindingService: IKeybindingService): IDisposable {
-	return keybindingService.onDidUpdateKeybindings(event => {
-		if (event.source === KeybindingSource.User && event.keybindings) {
-			telemetryService.publicLog('updateKeybindings', {
-				bindings: event.keybindings.map(binding => ({
-					key: binding.key,
-					command: binding.command,
-					when: binding.when,
-					args: binding.args ? true : undefined
-				}))
-			});
-		}
-	});
-}
-
-function flattenKeys(value: Object): string[] {
-	if (!value) {
-		return [];
-	}
-	const result: string[] = [];
-	flatKeys(result, '', value);
-	return result;
-}
-
-function flatKeys(result: string[], prefix: string, value: Object): void {
-	if (value && typeof value === 'object' && !Array.isArray(value)) {
-		Object.keys(value)
-			.forEach(key => flatKeys(result, prefix ? `${prefix}.${key}` : key, value[key]));
-	} else {
-		result.push(prefix);
-	}
-}
-
-function flattenValues(value: Object, keys: string[]): { [key: string]: any }[] {
-	if (!value) {
-		return [];
-	}
-
-	return keys.reduce((array, key) => {
-		const v = key.split('.')
-			.reduce((tmp, k) => tmp && typeof tmp === 'object' ? tmp[k] : undefined, value);
-		if (typeof v !== 'undefined') {
-			array.push({ [key]: v });
-		}
-		return array;
-	}, []);
-}
+//#endregion

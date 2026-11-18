@@ -2,148 +2,148 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import { TPromise } from 'vs/base/common/winjs.base';
-import { IDisposable } from 'vs/base/common/lifecycle';
-import { TypeConstraint, validateConstraints } from 'vs/base/common/types';
-import { ServicesAccessor, createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import Event from 'vs/base/common/event';
+import { Emitter, Event } from '../../../base/common/event.js';
+import { Iterable } from '../../../base/common/iterator.js';
+import { IJSONSchema } from '../../../base/common/jsonSchema.js';
+import { IDisposable, markAsSingleton, toDisposable } from '../../../base/common/lifecycle.js';
+import { LinkedList } from '../../../base/common/linkedList.js';
+import { TypeConstraint, validateConstraints } from '../../../base/common/types.js';
+import { ILocalizedString } from '../../action/common/action.js';
+import { createDecorator, ServicesAccessor } from '../../instantiation/common/instantiation.js';
 
 export const ICommandService = createDecorator<ICommandService>('commandService');
 
 export interface ICommandEvent {
-	commandId: string;
+	readonly commandId: string;
+	readonly args: unknown[];
 }
 
 export interface ICommandService {
-	_serviceBrand: any;
-	onWillExecuteCommand: Event<ICommandEvent>;
-	executeCommand<T>(commandId: string, ...args: any[]): TPromise<T>;
-	executeCommand(commandId: string, ...args: any[]): TPromise<any>;
+	readonly _serviceBrand: undefined;
+	readonly onWillExecuteCommand: Event<ICommandEvent>;
+	readonly onDidExecuteCommand: Event<ICommandEvent>;
+	executeCommand<R = unknown>(commandId: string, ...args: unknown[]): Promise<R | undefined>;
 }
 
-export interface ICommandsMap {
-	[id: string]: ICommand;
+export type ICommandsMap = Map<string, ICommand>;
+
+export type ICommandHandler<Args extends unknown[] = unknown[], R = void> = (accessor: ServicesAccessor, ...args: Args) => R;
+
+export interface ICommand<Args extends unknown[] = unknown[], R = void> {
+	id: string;
+	handler: ICommandHandler<Args, R>;
+	metadata?: ICommandMetadata | null;
 }
 
-export interface ICommandHandler {
-	(accessor: ServicesAccessor, ...args: any[]): void;
-}
-
-export interface ICommand {
-	handler: ICommandHandler;
-	description?: ICommandHandlerDescription;
-}
-
-export interface ICommandHandlerDescription {
-	description: string;
-	args: { name: string; description?: string; constraint?: TypeConstraint; }[];
-	returns?: string;
+export interface ICommandMetadata {
+	/**
+	 * NOTE: Please use an ILocalizedString. string is in the type for backcompat for now.
+	 * A short summary of what the command does. This will be used in:
+	 * - API commands
+	 * - when showing keybindings that have no other UX
+	 * - when searching for commands in the Command Palette
+	 */
+	readonly description: ILocalizedString | string;
+	readonly args?: ReadonlyArray<{
+		readonly name: string;
+		readonly isOptional?: boolean;
+		readonly description?: string;
+		readonly constraint?: TypeConstraint;
+		readonly schema?: IJSONSchema;
+	}>;
+	readonly returns?: string;
 }
 
 export interface ICommandRegistry {
-	registerCommand(id: string, command: ICommandHandler): IDisposable;
-	registerCommand(id: string, command: ICommand): IDisposable;
-	getCommand(id: string): ICommand;
+	readonly onDidRegisterCommand: Event<string>;
+	registerCommand<Args extends unknown[]>(id: string, command: ICommandHandler<Args>): IDisposable;
+	registerCommand<Args extends unknown[]>(command: ICommand<Args>): IDisposable;
+	registerCommandAlias(oldId: string, newId: string): IDisposable;
+	getCommand(id: string): ICommand | undefined;
 	getCommands(): ICommandsMap;
-}
-
-function isCommand(thing: any): thing is ICommand {
-	return typeof thing === 'object'
-		&& typeof (<ICommand>thing).handler === 'function'
-		&& (!(<ICommand>thing).description || typeof (<ICommand>thing).description === 'object');
 }
 
 export const CommandsRegistry: ICommandRegistry = new class implements ICommandRegistry {
 
-	private _commands = new Map<string, ICommand | ICommand[]>();
+	private readonly _commands = new Map<string, LinkedList<ICommand>>();
 
-	registerCommand(id: string, commandOrDesc: ICommandHandler | ICommand): IDisposable {
+	private readonly _onDidRegisterCommand = new Emitter<string>();
+	readonly onDidRegisterCommand: Event<string> = this._onDidRegisterCommand.event;
 
-		if (!commandOrDesc) {
+	registerCommand(idOrCommand: string | ICommand, handler?: ICommandHandler): IDisposable {
+
+		if (!idOrCommand) {
 			throw new Error(`invalid command`);
 		}
 
-		let command: ICommand;
-		if (!isCommand(commandOrDesc)) {
-			// simple handler
-			command = { handler: commandOrDesc };
-
-		} else {
-			const {handler, description} = commandOrDesc;
-			if (description) {
-				// add argument validation if rich command metadata is provided
-				const constraints: TypeConstraint[] = [];
-				for (let arg of description.args) {
-					constraints.push(arg.constraint);
-				}
-				command = {
-					description,
-					handler(accessor, ...args: any[]) {
-						validateConstraints(args, constraints);
-						return handler(accessor, ...args);
-					}
-				};
-			} else {
-				// add as simple handler
-				command = { handler };
+		if (typeof idOrCommand === 'string') {
+			if (!handler) {
+				throw new Error(`invalid command`);
 			}
+			return this.registerCommand({ id: idOrCommand, handler });
+		}
+
+		// add argument validation if rich command metadata is provided
+		if (idOrCommand.metadata && Array.isArray(idOrCommand.metadata.args)) {
+			const constraints: Array<TypeConstraint | undefined> = [];
+			for (const arg of idOrCommand.metadata.args) {
+				constraints.push(arg.constraint);
+			}
+			const actualHandler = idOrCommand.handler;
+			idOrCommand.handler = function (accessor, ...args: unknown[]) {
+				validateConstraints(args, constraints);
+				return actualHandler(accessor, ...args);
+			};
 		}
 
 		// find a place to store the command
-		const commandOrArray = this._commands.get(id);
-		if (commandOrArray === void 0) {
-			this._commands.set(id, command);
-		} else if (Array.isArray(commandOrArray)) {
-			commandOrArray.unshift(command);
-		} else {
-			this._commands.set(id, [command, commandOrArray]);
+		const { id } = idOrCommand;
+
+		let commands = this._commands.get(id);
+		if (!commands) {
+			commands = new LinkedList<ICommand>();
+			this._commands.set(id, commands);
 		}
 
-		return {
-			dispose: () => {
-				const commandOrArray = this._commands.get(id);
-				if (Array.isArray(commandOrArray)) {
-					// remove from array, remove array
-					// if last element removed
-					const idx = commandOrArray.indexOf(command);
-					if (idx >= 0) {
-						commandOrArray.splice(idx, 1);
-						if (commandOrArray.length === 0) {
-							this._commands.delete(id);
-						}
-					}
-				} else if (isCommand(commandOrArray)) {
-					// remove from map
-					this._commands.delete(id);
-				}
+		const removeFn = commands.unshift(idOrCommand);
+
+		const ret = toDisposable(() => {
+			removeFn();
+			const command = this._commands.get(id);
+			if (command?.isEmpty()) {
+				this._commands.delete(id);
 			}
-		};
+		});
+
+		// tell the world about this command
+		this._onDidRegisterCommand.fire(id);
+
+		return markAsSingleton(ret);
 	}
 
-	getCommand(id: string): ICommand {
-		const commandOrArray = this._commands.get(id);
-		if (Array.isArray(commandOrArray)) {
-			return commandOrArray[0];
-		} else {
-			return commandOrArray;
+	registerCommandAlias(oldId: string, newId: string): IDisposable {
+		return CommandsRegistry.registerCommand(oldId, (accessor, ...args) => accessor.get(ICommandService).executeCommand(newId, ...args));
+	}
+
+	getCommand(id: string): ICommand | undefined {
+		const list = this._commands.get(id);
+		if (!list || list.isEmpty()) {
+			return undefined;
 		}
+		return Iterable.first(list);
 	}
 
 	getCommands(): ICommandsMap {
-		const result: ICommandsMap = Object.create(null);
-		this._commands.forEach((value, key) => {
-			result[key] = this.getCommand(key);
-		});
+		const result = new Map<string, ICommand>();
+		for (const key of this._commands.keys()) {
+			const command = this.getCommand(key);
+			if (command) {
+				result.set(key, command);
+			}
+		}
 		return result;
 	}
 };
 
-export const NullCommandService: ICommandService = {
-	_serviceBrand: undefined,
-	onWillExecuteCommand: () => ({ dispose: () => { } }),
-	executeCommand() {
-		return TPromise.as(undefined);
-	}
-};
+CommandsRegistry.registerCommand('noop', () => { });

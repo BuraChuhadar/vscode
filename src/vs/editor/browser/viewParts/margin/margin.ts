@@ -3,18 +3,26 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
+import './margin.css';
+import { FastDomNode, createFastDomNode } from '../../../../base/browser/fastDomNode.js';
+import { ViewPart } from '../../view/viewPart.js';
+import { RenderingContext, RestrictedRenderingContext } from '../../view/renderingContext.js';
+import { ViewContext } from '../../../common/viewModel/viewContext.js';
+import * as viewEvents from '../../../common/viewEvents.js';
+import { EditorOption } from '../../../common/config/editorOptions.js';
 
-import { FastDomNode, createFastDomNode } from 'vs/base/browser/fastDomNode';
-import { ClassNames } from 'vs/editor/browser/editorBrowser';
-import { ViewPart } from 'vs/editor/browser/view/viewPart';
-import { ViewContext } from 'vs/editor/common/view/viewContext';
-import { RenderingContext, RestrictedRenderingContext } from 'vs/editor/common/view/renderingContext';
-import * as viewEvents from 'vs/editor/common/view/viewEvents';
-
+/**
+ * Margin is a vertical strip located on the left of the editor's content area.
+ * It is used for various features such as line numbers, folding markers, and
+ * decorations that provide additional information about the lines of code.
+ */
 export class Margin extends ViewPart {
-	private _domNode: FastDomNode<HTMLElement>;
-	private _canUseTranslate3d: boolean;
+
+	public static readonly CLASS_NAME = 'glyph-margin';
+	public static readonly OUTER_CLASS_NAME = 'margin';
+
+	private readonly _domNode: FastDomNode<HTMLElement>;
+	private _canUseLayerHinting: boolean;
 	private _contentLeft: number;
 	private _glyphMarginLeft: number;
 	private _glyphMarginWidth: number;
@@ -22,52 +30,45 @@ export class Margin extends ViewPart {
 
 	constructor(context: ViewContext) {
 		super(context);
-		this._canUseTranslate3d = this._context.configuration.editor.viewInfo.canUseTranslate3d;
-		this._contentLeft = this._context.configuration.editor.layoutInfo.contentLeft;
-		this._glyphMarginLeft = this._context.configuration.editor.layoutInfo.glyphMarginLeft;
-		this._glyphMarginWidth = this._context.configuration.editor.layoutInfo.glyphMarginWidth;
+		const options = this._context.configuration.options;
+		const layoutInfo = options.get(EditorOption.layoutInfo);
 
-		this._domNode = this._createDomNode();
-	}
+		this._canUseLayerHinting = !options.get(EditorOption.disableLayerHinting);
+		this._contentLeft = layoutInfo.contentLeft;
+		this._glyphMarginLeft = layoutInfo.glyphMarginLeft;
+		this._glyphMarginWidth = layoutInfo.glyphMarginWidth;
 
-	public dispose(): void {
-		super.dispose();
-	}
-
-	public getDomNode(): HTMLElement {
-		return this._domNode.domNode;
-	}
-
-	private _createDomNode(): FastDomNode<HTMLElement> {
-		let domNode = createFastDomNode(document.createElement('div'));
-		domNode.setClassName(ClassNames.MARGIN + ' monaco-editor-background');
-		domNode.setPosition('absolute');
-		domNode.setAttribute('role', 'presentation');
-		domNode.setAttribute('aria-hidden', 'true');
+		this._domNode = createFastDomNode(document.createElement('div'));
+		this._domNode.setClassName(Margin.OUTER_CLASS_NAME);
+		this._domNode.setPosition('absolute');
+		this._domNode.setAttribute('role', 'presentation');
+		this._domNode.setAttribute('aria-hidden', 'true');
 
 		this._glyphMarginBackgroundDomNode = createFastDomNode(document.createElement('div'));
-		this._glyphMarginBackgroundDomNode.setClassName(ClassNames.GLYPH_MARGIN);
+		this._glyphMarginBackgroundDomNode.setClassName(Margin.CLASS_NAME);
 
-		domNode.domNode.appendChild(this._glyphMarginBackgroundDomNode.domNode);
-		return domNode;
+		this._domNode.appendChild(this._glyphMarginBackgroundDomNode);
+	}
+
+
+	public getDomNode(): FastDomNode<HTMLElement> {
+		return this._domNode;
 	}
 
 	// --- begin event handlers
 
-	public onConfigurationChanged(e: viewEvents.ViewConfigurationChangedEvent): boolean {
-		if (e.viewInfo.canUseTranslate3d) {
-			this._canUseTranslate3d = this._context.configuration.editor.viewInfo.canUseTranslate3d;
-		}
+	public override onConfigurationChanged(e: viewEvents.ViewConfigurationChangedEvent): boolean {
+		const options = this._context.configuration.options;
+		const layoutInfo = options.get(EditorOption.layoutInfo);
 
-		if (e.layoutInfo) {
-			this._contentLeft = this._context.configuration.editor.layoutInfo.contentLeft;
-			this._glyphMarginLeft = this._context.configuration.editor.layoutInfo.glyphMarginLeft;
-			this._glyphMarginWidth = this._context.configuration.editor.layoutInfo.glyphMarginWidth;
-		}
+		this._canUseLayerHinting = !options.get(EditorOption.disableLayerHinting);
+		this._contentLeft = layoutInfo.contentLeft;
+		this._glyphMarginLeft = layoutInfo.glyphMarginLeft;
+		this._glyphMarginWidth = layoutInfo.glyphMarginWidth;
 
 		return true;
 	}
-	public onScrollChanged(e: viewEvents.ViewScrollChangedEvent): boolean {
+	public override onScrollChanged(e: viewEvents.ViewScrollChangedEvent): boolean {
 		return super.onScrollChanged(e) || e.scrollTopChanged;
 	}
 
@@ -78,17 +79,12 @@ export class Margin extends ViewPart {
 	}
 
 	public render(ctx: RestrictedRenderingContext): void {
+		this._domNode.setLayerHinting(this._canUseLayerHinting);
+		this._domNode.setContain('strict');
 		const adjustedScrollTop = ctx.scrollTop - ctx.bigNumbersDelta;
-		if (this._canUseTranslate3d) {
-			let transform = 'translate3d(0px, ' + -adjustedScrollTop + 'px, 0px)';
-			this._domNode.setTransform(transform);
-			this._domNode.setTop(0);
-		} else {
-			this._domNode.setTransform('');
-			this._domNode.setTop(-adjustedScrollTop);
-		}
+		this._domNode.setTop(-adjustedScrollTop);
 
-		let height = Math.min(ctx.scrollHeight, 1000000);
+		const height = Math.min(ctx.scrollHeight, 1000000);
 		this._domNode.setHeight(height);
 		this._domNode.setWidth(this._contentLeft);
 

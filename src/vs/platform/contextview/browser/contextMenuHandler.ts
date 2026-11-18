@@ -3,146 +3,179 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
+import { getContextMenuAutoSelectItem, IContextMenuDelegate } from '../../../base/browser/contextmenu.js';
+import { $, addDisposableListener, EventType, getActiveElement, getWindow, isAncestor, isHTMLElement } from '../../../base/browser/dom.js';
+import { StandardMouseEvent } from '../../../base/browser/mouseEvent.js';
+import { Menu } from '../../../base/browser/ui/menu/menu.js';
+import { ActionRunner, IRunEvent, WorkbenchActionExecutedClassification, WorkbenchActionExecutedEvent } from '../../../base/common/actions.js';
+import { isCancellationError } from '../../../base/common/errors.js';
+import { combinedDisposable, DisposableStore, IDisposable } from '../../../base/common/lifecycle.js';
+import { isPopoverDOMPosition } from '../../../base/browser/ui/contextview/contextview.js';
+import { getMenuActionGroupTitle } from '../../actions/common/actions.js';
+import { IContextViewService } from './contextView.js';
+import { IKeybindingService } from '../../keybinding/common/keybinding.js';
+import { INotificationService } from '../../notification/common/notification.js';
+import { ITelemetryService } from '../../telemetry/common/telemetry.js';
+import { defaultMenuStyles } from '../../theme/browser/defaultStyles.js';
 
-import 'vs/css!./contextMenuHandler';
-import { $, Builder } from 'vs/base/browser/builder';
-import { combinedDisposable, IDisposable } from 'vs/base/common/lifecycle';
-import { StandardMouseEvent } from 'vs/base/browser/mouseEvent';
-import { IActionRunner, ActionRunner, IAction } from 'vs/base/common/actions';
-import { Menu } from 'vs/base/browser/ui/menu/menu';
-import { EventType } from 'vs/base/common/events';
-import Severity from 'vs/base/common/severity';
 
-import { IContextViewService, IContextMenuDelegate } from 'vs/platform/contextview/browser/contextView';
-import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
-import { IMessageService } from 'vs/platform/message/common/message';
+export interface IContextMenuHandlerOptions {
+	blockMouse: boolean;
+}
 
 export class ContextMenuHandler {
+	private focusToReturn: HTMLElement | null = null;
+	private lastContainer: HTMLElement | null = null;
+	private lastHostedAsPopover = false;
+	private block: HTMLElement | null = null;
+	private blockDisposable: IDisposable | null = null;
+	private options: IContextMenuHandlerOptions = { blockMouse: true };
 
-	private contextViewService: IContextViewService;
-	private messageService: IMessageService;
-	private telemetryService: ITelemetryService;
+	constructor(
+		private contextViewService: IContextViewService,
+		private telemetryService: ITelemetryService,
+		private notificationService: INotificationService,
+		private keybindingService: IKeybindingService,
+	) { }
 
-	private actionRunner: IActionRunner;
-	private $el: Builder;
-	private menuContainerElement: HTMLElement;
-	private toDispose: IDisposable[];
-
-	constructor(element: HTMLElement, contextViewService: IContextViewService, telemetryService: ITelemetryService, messageService: IMessageService) {
-		this.setContainer(element);
-
-		this.contextViewService = contextViewService;
-		this.telemetryService = telemetryService;
-		this.messageService = messageService;
-
-		this.actionRunner = new ActionRunner();
-		this.menuContainerElement = null;
-		this.toDispose = [];
-
-		let hideViewOnRun = false;
-
-		this.toDispose.push(this.actionRunner.addListener2(EventType.BEFORE_RUN, (e: any) => {
-			if (this.telemetryService) {
-				this.telemetryService.publicLog('workbenchActionExecuted', { id: e.action.id, from: 'contextMenu' });
-			}
-
-			hideViewOnRun = !!e.retainActionItem;
-
-			if (!hideViewOnRun) {
-				this.contextViewService.hideContextView(false);
-			}
-		}));
-
-		this.toDispose.push(this.actionRunner.addListener2(EventType.RUN, (e: any) => {
-			if (hideViewOnRun) {
-				this.contextViewService.hideContextView(false);
-			}
-
-			hideViewOnRun = false;
-
-			if (e.error && this.messageService) {
-				this.messageService.show(Severity.Error, e.error);
-			}
-		}));
+	configure(options: IContextMenuHandlerOptions): void {
+		this.options = options;
 	}
 
-	public setContainer(container: HTMLElement): void {
-		if (this.$el) {
-			this.$el.off(['click', 'mousedown']);
-			this.$el = null;
+	showContextMenu(delegate: IContextMenuDelegate): boolean {
+		const actions = delegate.getActions();
+		if (!actions.length) {
+			return false; // Don't render an empty context menu
 		}
-		if (container) {
-			this.$el = $(container);
-			this.$el.on('mousedown', (e: MouseEvent) => this.onMouseDown(e));
-		}
-	}
 
-	public showContextMenu(delegate: IContextMenuDelegate): void {
-		delegate.getActions().done((actions: IAction[]) => {
-			this.contextViewService.showContextView({
-				getAnchor: () => delegate.getAnchor(),
-				canRelayout: false,
+		this.focusToReturn = getActiveElement() as HTMLElement;
 
-				render: (container) => {
-					this.menuContainerElement = container;
+		let menu: Menu | undefined;
 
-					let className = delegate.getMenuClassName ? delegate.getMenuClassName() : '';
+		const shadowRootElement = isHTMLElement(delegate.domForShadowRoot) ? delegate.domForShadowRoot : undefined;
+		this.contextViewService.showContextView({
+			getAnchor: () => delegate.getAnchor(),
+			canRelayout: false,
+			anchorAlignment: delegate.anchorAlignment,
+			anchorAxisAlignment: delegate.anchorAxisAlignment,
+			closeAnimation: delegate.closeAnimation,
+			layer: delegate.layer,
+			hostAsPopover: delegate.hostAsPopover,
+			render: (container, context) => {
+				this.lastContainer = container;
+				// A popover-hosted context view handles outside clicks and focus restore itself
+				this.lastHostedAsPopover = !!context && isPopoverDOMPosition(context.domPosition);
+				const className = delegate.getMenuClassName ? delegate.getMenuClassName() : '';
 
-					if (className) {
-						container.className += ' ' + className;
-					}
-
-					let menu = new Menu(container, actions, {
-						actionItemProvider: delegate.getActionItem,
-						context: delegate.getActionsContext ? delegate.getActionsContext() : null,
-						actionRunner: this.actionRunner
-					});
-
-					let listener1 = menu.addListener2(EventType.CANCEL, (e: any) => {
-						this.contextViewService.hideContextView(true);
-					});
-
-					let listener2 = menu.addListener2(EventType.BLUR, (e: any) => {
-						this.contextViewService.hideContextView(true);
-					});
-
-					menu.focus();
-
-					return combinedDisposable([listener1, listener2, menu]);
-				},
-
-				onHide: (didCancel?: boolean) => {
-					if (delegate.onHide) {
-						delegate.onHide(didCancel);
-					}
-
-					this.menuContainerElement = null;
+				if (className) {
+					container.className += ' ' + className;
 				}
-			});
-		});
-	}
 
-	private onMouseDown(e: MouseEvent): void {
-		if (!this.menuContainerElement) {
-			return;
-		}
+				// Render invisible div to block mouse interaction in the rest of the UI
+				if (this.options.blockMouse && !this.lastHostedAsPopover) {
+					this.block = container.appendChild($('.context-view-block'));
+					this.block.style.position = 'fixed';
+					this.block.style.cursor = 'initial';
+					this.block.style.left = '0';
+					this.block.style.top = '0';
+					this.block.style.width = '100%';
+					this.block.style.height = '100%';
+					this.block.style.zIndex = '-1';
 
-		let event = new StandardMouseEvent(e);
-		let element = event.target;
+					this.blockDisposable?.dispose();
+					this.blockDisposable = addDisposableListener(this.block, EventType.MOUSE_DOWN, e => e.stopPropagation());
+				}
 
-		while (element) {
-			if (element === this.menuContainerElement) {
-				return;
+				const menuDisposables = new DisposableStore();
+
+				const actionRunner = delegate.actionRunner || menuDisposables.add(new ActionRunner());
+				actionRunner.onWillRun(evt => this.onActionRun(evt, !delegate.skipTelemetry), this, menuDisposables);
+				actionRunner.onDidRun(this.onDidActionRun, this, menuDisposables);
+				menu = new Menu(container, actions, {
+					actionViewItemProvider: delegate.getActionViewItem,
+					context: delegate.getActionsContext ? delegate.getActionsContext() : null,
+					actionRunner,
+					getKeyBinding: delegate.getKeyBinding ? delegate.getKeyBinding : action => this.keybindingService.lookupKeybinding(action.id),
+					getGroupTitle: getMenuActionGroupTitle,
+				},
+					defaultMenuStyles
+				);
+
+				menu.onDidCancel(() => this.contextViewService.hideContextView(true), null, menuDisposables);
+				menu.onDidBlur(() => this.contextViewService.hideContextView(true), null, menuDisposables);
+				const targetWindow = getWindow(container);
+				menuDisposables.add(addDisposableListener(targetWindow, EventType.BLUR, () => this.contextViewService.hideContextView(true)));
+				menuDisposables.add(addDisposableListener(targetWindow, EventType.MOUSE_DOWN, (e: MouseEvent) => {
+					if (e.defaultPrevented) {
+						return;
+					}
+
+					const event = new StandardMouseEvent(targetWindow, e);
+					let element: HTMLElement | null = event.target;
+
+					// Don't do anything as we are likely creating a context menu
+					if (event.rightButton) {
+						return;
+					}
+
+					while (element) {
+						if (element === container) {
+							return;
+						}
+
+						element = element.parentElement;
+					}
+
+					this.contextViewService.hideContextView(true);
+				}));
+
+				return combinedDisposable(menuDisposables, menu);
+			},
+
+			focus: () => {
+				const selection = getContextMenuAutoSelectItem(delegate, actions);
+				if (typeof selection === 'number') {
+					// The menu adds group headers and removes redundant separators, which can move the selected action
+					const index = menu?.indexOfAction(actions[selection]) ?? -1;
+					menu?.focus(index >= 0 ? index : selection);
+				} else {
+					menu?.focus(selection);
+				}
+			},
+
+			onHide: (didCancel?: boolean) => {
+				delegate.onHide?.(!!didCancel);
+
+				if (this.block) {
+					this.block.remove();
+					this.block = null;
+				}
+
+				this.blockDisposable?.dispose();
+				this.blockDisposable = null;
+
+				if (!this.lastHostedAsPopover && !!this.lastContainer && (getActiveElement() === this.lastContainer || isAncestor(getActiveElement(), this.lastContainer))) {
+					this.focusToReturn?.focus();
+				}
+
+				this.lastContainer = null;
+				this.lastHostedAsPopover = false;
 			}
-
-			element = element.parentElement;
-		}
-
-		this.contextViewService.hideContextView();
+		}, shadowRootElement, !!shadowRootElement, delegate.useWindowContainerForShadowRoot);
+		return true;
 	}
 
-	public dispose(): void {
-		this.setContainer(null);
+	private onActionRun(e: IRunEvent, logTelemetry: boolean): void {
+		if (logTelemetry) {
+			this.telemetryService.publicLog2<WorkbenchActionExecutedEvent, WorkbenchActionExecutedClassification>('workbenchActionExecuted', { id: e.action.id, from: 'contextMenu' });
+		}
+
+		this.contextViewService.hideContextView(false);
+	}
+
+	private onDidActionRun(e: IRunEvent): void {
+		if (e.error && !isCancellationError(e.error)) {
+			this.notificationService.error(e.error);
+		}
 	}
 }

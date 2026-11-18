@@ -1,13 +1,27 @@
 {
 	"compilerOptions": {
-		"module": "commonjs",
-		"noImplicitAny": false,
-		"removeComments": false,
-		"preserveConstEnums": true,
-		"target": "es5",
-		"sourceMap": false,
-		"experimentalDecorators": true,
-		"noLib": true,
-		"newLine": "LF"
-	}
+		"target": "es2024",
+		"lib": [
+			"ES2024"
+		],
+		"types": [],
+		"module": "nodenext",
+		"noEmit": true,
+		"erasableSyntaxOnly": true,
+		"verbatimModuleSyntax": true,
+		"allowImportingTsExtensions": true,
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"strict": true,
+		"exactOptionalPropertyTypes": false,
+		"useUnknownInCatchVariables": false,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true
+	},
+	"exclude": [
+		"node_modules/**",
+		"monaco-editor-playground/**",
+		"builtin/**",
+		"vite/**"
+	]
 }

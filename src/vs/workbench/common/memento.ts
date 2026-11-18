@@ -2,123 +2,163 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import types = require('vs/base/common/types');
-import { IStorageService, StorageScope } from 'vs/platform/storage/common/storage';
+import { IStorageService, IStorageValueChangeEvent, StorageScope, StorageTarget } from '../../platform/storage/common/storage.js';
+import { isEmptyObject } from '../../base/common/types.js';
+import { onUnexpectedError } from '../../base/common/errors.js';
+import { DisposableStore } from '../../base/common/lifecycle.js';
+import { Event } from '../../base/common/event.js';
 
-/**
- * Supported memento scopes.
- */
-export enum Scope {
+export class Memento<T extends object> {
 
-	/**
-	 * The memento will be scoped to all workspaces of this domain.
-	 */
-	GLOBAL,
+	private static readonly applicationMementos = new Map<string, ScopedMemento<unknown>>();
+	private static readonly applicationSharedMementos = new Map<string, ScopedMemento<unknown>>();
+	private static readonly profileMementos = new Map<string, ScopedMemento<unknown>>();
+	private static readonly workspaceMementos = new Map<string, ScopedMemento<unknown>>();
 
-	/**
-	 * The memento will be scoped to the current workspace.
-	 */
-	WORKSPACE
-}
+	private static readonly COMMON_PREFIX = 'memento/';
 
-/**
- * A memento provides access to a datastructure that is persisted and restored as part of the workbench lifecycle.
- */
-export class Memento {
+	private readonly id: string;
 
-	// Mementos are static to ensure that for a given component with an id only ever one memento gets loaded
-	private static globalMementos: { [id: string]: ScopedMemento } = {};
-	private static workspaceMementos: { [id: string]: ScopedMemento } = {};
-
-	private static COMMON_PREFIX = 'memento/';
-
-	private id: string;
-
-	constructor(id: string) {
-		this.id = Memento.COMMON_PREFIX + id.toLowerCase();
+	constructor(id: string, private storageService: IStorageService) {
+		this.id = Memento.COMMON_PREFIX + id;
 	}
 
-	/**
-	 * Returns a JSON Object that represents the data of this memento. The optional
-	 * parameter scope allows to specify the scope of the memento to load. If not
-	 * provided, the scope will be global, Memento.Scope.WORKSPACE can be used to
-	 * scope the memento to the workspace.
-	 */
-	public getMemento(storageService: IStorageService, scope: Scope = Scope.GLOBAL): any {
+	getMemento(scope: StorageScope, target: StorageTarget): Partial<T> {
+		switch (scope) {
+			case StorageScope.WORKSPACE: {
+				let workspaceMemento = Memento.workspaceMementos.get(this.id);
+				if (!workspaceMemento) {
+					workspaceMemento = new ScopedMemento(this.id, scope, target, this.storageService);
+					Memento.workspaceMementos.set(this.id, workspaceMemento);
+				}
 
-		// Scope by Workspace
-		if (scope === Scope.WORKSPACE) {
-			let workspaceMemento = Memento.workspaceMementos[this.id];
-			if (!workspaceMemento) {
-				workspaceMemento = new ScopedMemento(this.id, scope, storageService);
-				Memento.workspaceMementos[this.id] = workspaceMemento;
+				return workspaceMemento.getMemento();
 			}
 
-			return workspaceMemento.getMemento();
-		}
+			case StorageScope.PROFILE: {
+				let profileMemento = Memento.profileMementos.get(this.id);
+				if (!profileMemento) {
+					profileMemento = new ScopedMemento(this.id, scope, target, this.storageService);
+					Memento.profileMementos.set(this.id, profileMemento);
+				}
 
-		// Use global scope
-		let globalMemento = Memento.globalMementos[this.id];
-		if (!globalMemento) {
-			globalMemento = new ScopedMemento(this.id, scope, storageService);
-			Memento.globalMementos[this.id] = globalMemento;
-		}
+				return profileMemento.getMemento();
+			}
 
-		return globalMemento.getMemento();
+			case StorageScope.APPLICATION: {
+				let applicationMemento = Memento.applicationMementos.get(this.id);
+				if (!applicationMemento) {
+					applicationMemento = new ScopedMemento(this.id, scope, target, this.storageService);
+					Memento.applicationMementos.set(this.id, applicationMemento);
+				}
+
+				return applicationMemento.getMemento();
+			}
+
+			case StorageScope.APPLICATION_SHARED: {
+				let applicationSharedMemento = Memento.applicationSharedMementos.get(this.id);
+				if (!applicationSharedMemento) {
+					applicationSharedMemento = new ScopedMemento(this.id, scope, target, this.storageService);
+					Memento.applicationSharedMementos.set(this.id, applicationSharedMemento);
+				}
+
+				return applicationSharedMemento.getMemento();
+			}
+		}
 	}
 
-	/**
-	 * Saves all data of the mementos that have been loaded to the local storage. This includes
-	 * global and workspace scope.
-	 */
-	public saveMemento(): void {
+	onDidChangeValue(scope: StorageScope, disposables: DisposableStore): Event<IStorageValueChangeEvent> {
+		return this.storageService.onDidChangeValue(scope, this.id, disposables);
+	}
 
-		// Global
-		if (Memento.globalMementos[this.id]) {
-			Memento.globalMementos[this.id].save();
+	saveMemento(): void {
+		Memento.workspaceMementos.get(this.id)?.save();
+		Memento.profileMementos.get(this.id)?.save();
+		Memento.applicationMementos.get(this.id)?.save();
+		Memento.applicationSharedMementos.get(this.id)?.save();
+	}
+
+	reloadMemento(scope: StorageScope): void {
+		let memento: ScopedMemento<unknown> | undefined;
+		switch (scope) {
+			case StorageScope.APPLICATION_SHARED:
+				memento = Memento.applicationSharedMementos.get(this.id);
+				break;
+			case StorageScope.APPLICATION:
+				memento = Memento.applicationMementos.get(this.id);
+				break;
+			case StorageScope.PROFILE:
+				memento = Memento.profileMementos.get(this.id);
+				break;
+			case StorageScope.WORKSPACE:
+				memento = Memento.workspaceMementos.get(this.id);
+				break;
 		}
 
-		// Workspace
-		if (Memento.workspaceMementos[this.id]) {
-			Memento.workspaceMementos[this.id].save();
+		memento?.reload();
+	}
+
+	static clear(scope: StorageScope): void {
+		switch (scope) {
+			case StorageScope.WORKSPACE:
+				Memento.workspaceMementos.clear();
+				break;
+			case StorageScope.PROFILE:
+				Memento.profileMementos.clear();
+				break;
+			case StorageScope.APPLICATION:
+				Memento.applicationMementos.clear();
+				break;
+			case StorageScope.APPLICATION_SHARED:
+				Memento.applicationSharedMementos.clear();
+				break;
 		}
 	}
 }
 
-class ScopedMemento {
-	private id: string;
-	private mementoObj: any;
-	private scope: Scope;
+class ScopedMemento<T> {
 
-	constructor(id: string, scope: Scope, private storageService: IStorageService) {
-		this.id = id;
-		this.scope = scope;
-		this.mementoObj = this.loadMemento();
+	private mementoObj: Partial<T>;
+
+	constructor(private id: string, private scope: StorageScope, private target: StorageTarget, private storageService: IStorageService) {
+		this.mementoObj = this.doLoad();
 	}
 
-	public getMemento(): any {
-		return this.mementoObj;
-	}
-
-	private loadMemento(): any {
-		let storageScope = this.scope === Scope.GLOBAL ? StorageScope.GLOBAL : StorageScope.WORKSPACE;
-		let memento = this.storageService.get(this.id, storageScope);
-		if (memento) {
-			return JSON.parse(memento);
+	private doLoad(): Partial<T> {
+		try {
+			return this.storageService.getObject(this.id, this.scope, {});
+		} catch (error) {
+			// Seeing reports from users unable to open editors
+			// from memento parsing exceptions. Log the contents
+			// to diagnose further
+			// https://github.com/microsoft/vscode/issues/102251
+			onUnexpectedError(`[memento]: failed to parse contents: ${error} (id: ${this.id}, scope: ${this.scope}, contents: ${this.storageService.get(this.id, this.scope)})`);
 		}
 
 		return {};
 	}
 
-	public save(): void {
-		let storageScope = this.scope === Scope.GLOBAL ? StorageScope.GLOBAL : StorageScope.WORKSPACE;
+	getMemento(): Partial<T> {
+		return this.mementoObj;
+	}
 
-		if (!types.isEmptyObject(this.mementoObj)) {
-			this.storageService.store(this.id, JSON.stringify(this.mementoObj), storageScope);
+	reload(): void {
+
+		// Clear old
+		for (const name of Object.getOwnPropertyNames(this.mementoObj)) {
+			delete this.mementoObj[name as keyof Partial<T>];
+		}
+
+		// Assign new
+		Object.assign(this.mementoObj, this.doLoad());
+	}
+
+	save(): void {
+		if (!isEmptyObject(this.mementoObj)) {
+			this.storageService.store(this.id, this.mementoObj, this.scope, this.target);
 		} else {
-			this.storageService.remove(this.id, storageScope);
+			this.storageService.remove(this.id, this.scope);
 		}
 	}
 }

@@ -2,117 +2,260 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import 'vs/css!./findInput';
+import * as dom from '../../dom.js';
+import { IKeyboardEvent } from '../../keyboardEvent.js';
+import { IMouseEvent } from '../../mouseEvent.js';
+import { IToggleStyles, Toggle } from '../toggle/toggle.js';
+import { IContextViewProvider } from '../contextview/contextview.js';
+import { CaseSensitiveToggle, navigateToggles, RegexToggle, WholeWordsToggle } from './findInputToggles.js';
+import { HistoryInputBox, IInputBoxStyles, IInputValidator, IMessage as InputBoxMessage } from '../inputbox/inputBox.js';
+import { Widget } from '../widget.js';
+import { Emitter, Event } from '../../../common/event.js';
+import { IAction } from '../../../common/actions.js';
+import type { IActionViewItemProvider } from '../actionbar/actionbar.js';
+import './findInput.css';
+import * as nls from '../../../../nls.js';
+import { DisposableStore, MutableDisposable } from '../../../common/lifecycle.js';
+import { IHistory } from '../../../common/history.js';
+import type { IHoverLifecycleOptions } from '../hover/hover.js';
 
-import * as nls from 'vs/nls';
-import * as dom from 'vs/base/browser/dom';
-import { IMessage as InputBoxMessage, IInputValidator, InputBox, IInputBoxStyles } from 'vs/base/browser/ui/inputbox/inputBox';
-import { IContextViewProvider } from 'vs/base/browser/ui/contextview/contextview';
-import { Widget } from 'vs/base/browser/ui/widget';
-import Event, { Emitter } from 'vs/base/common/event';
-import { IKeyboardEvent } from 'vs/base/browser/keyboardEvent';
-import { KeyCode } from 'vs/base/common/keyCodes';
-import { CaseSensitiveCheckbox, WholeWordsCheckbox, RegexCheckbox } from 'vs/base/browser/ui/findinput/findInputCheckboxes';
-import { Color } from "vs/base/common/color";
-import { ICheckboxStyles } from "vs/base/browser/ui/checkbox/checkbox";
 
-export interface IFindInputOptions extends IFindInputStyles {
-	placeholder?: string;
-	width?: number;
-	validation?: IInputValidator;
-	label: string;
+export interface IFindInputOptions {
+	readonly placeholder?: string;
+	readonly width?: number;
+	readonly validation?: IInputValidator;
+	readonly label: string;
+	readonly flexibleHeight?: boolean;
+	readonly flexibleWidth?: boolean;
+	readonly flexibleMaxHeight?: number;
 
-	appendCaseSensitiveLabel?: string;
-	appendWholeWordsLabel?: string;
-	appendRegexLabel?: string;
+	readonly showCommonFindToggles?: boolean;
+	readonly appendCaseSensitiveLabel?: string;
+	readonly appendWholeWordsLabel?: string;
+	readonly appendRegexLabel?: string;
+	readonly additionalToggles?: Toggle[];
+	readonly actions?: ReadonlyArray<IAction>;
+	readonly actionViewItemProvider?: IActionViewItemProvider;
+	readonly showHistoryHint?: () => boolean;
+	readonly toggleStyles: IToggleStyles;
+	readonly inputBoxStyles: IInputBoxStyles;
+	readonly history?: IHistory<string>;
+	readonly hoverLifecycleOptions?: IHoverLifecycleOptions;
+	readonly hideHoverOnValueChange?: boolean;
 }
 
-export interface IFindInputStyles extends IInputBoxStyles {
-	inputActiveOptionBorder?: Color;
+export interface IFindInputEvent {
+	readonly fromCompositionEnd: boolean;
 }
 
 const NLS_DEFAULT_LABEL = nls.localize('defaultLabel', "input");
 
 export class FindInput extends Widget {
 
-	static OPTION_CHANGE: string = 'optionChange';
+	static readonly OPTION_CHANGE: string = 'optionChange';
 
-	private contextViewProvider: IContextViewProvider;
-	private width: number;
 	private placeholder: string;
-	private validation: IInputValidator;
+	private validation?: IInputValidator;
 	private label: string;
+	private readonly showCommonFindToggles: boolean;
+	private fixFocusOnOptionClickEnabled = true;
+	private imeSessionInProgress = false;
+	private readonly additionalTogglesDisposables: MutableDisposable<DisposableStore> = this._register(new MutableDisposable());
 
-	private inputActiveOptionBorder: Color;
-	private inputBackground: Color;
-	private inputForeground: Color;
+	protected readonly controls: HTMLDivElement;
+	protected readonly regex?: RegexToggle;
+	protected readonly wholeWords?: WholeWordsToggle;
+	protected readonly caseSensitive?: CaseSensitiveToggle;
+	protected additionalToggles: Toggle[] = [];
+	public readonly domNode: HTMLElement;
+	public readonly inputBox: HistoryInputBox;
 
-	private regex: RegexCheckbox;
-	private wholeWords: WholeWordsCheckbox;
-	private caseSensitive: CaseSensitiveCheckbox;
-	public domNode: HTMLElement;
-	public inputBox: InputBox;
+	private readonly _onDidOptionChange = this._register(new Emitter<boolean>());
+	public get onDidOptionChange(): Event<boolean /* via keyboard */> { return this._onDidOptionChange.event; }
 
-	private _onDidOptionChange = this._register(new Emitter<boolean>());
-	public onDidOptionChange: Event<boolean /* via keyboard */> = this._onDidOptionChange.event;
+	private readonly _onKeyDown = this._register(new Emitter<IKeyboardEvent>());
+	public get onKeyDown(): Event<IKeyboardEvent> { return this._onKeyDown.event; }
 
-	private _onKeyDown = this._register(new Emitter<IKeyboardEvent>());
-	public onKeyDown: Event<IKeyboardEvent> = this._onKeyDown.event;
+	private readonly _onMouseDown = this._register(new Emitter<IMouseEvent>());
+	public get onMouseDown(): Event<IMouseEvent> { return this._onMouseDown.event; }
 
-	private _onInput = this._register(new Emitter<void>());
-	public onInput: Event<void> = this._onInput.event;
+	private readonly _onInput = this._register(new Emitter<IFindInputEvent>());
+	public get onInput(): Event<IFindInputEvent> { return this._onInput.event; }
 
-	private _onKeyUp = this._register(new Emitter<IKeyboardEvent>());
-	public onKeyUp: Event<IKeyboardEvent> = this._onKeyUp.event;
+	private readonly _onKeyUp = this._register(new Emitter<IKeyboardEvent>());
+	public get onKeyUp(): Event<IKeyboardEvent> { return this._onKeyUp.event; }
 
 	private _onCaseSensitiveKeyDown = this._register(new Emitter<IKeyboardEvent>());
-	public onCaseSensitiveKeyDown: Event<IKeyboardEvent> = this._onCaseSensitiveKeyDown.event;
+	public get onCaseSensitiveKeyDown(): Event<IKeyboardEvent> { return this._onCaseSensitiveKeyDown.event; }
 
-	constructor(parent: HTMLElement, contextViewProvider: IContextViewProvider, options?: IFindInputOptions) {
+	private _onRegexKeyDown = this._register(new Emitter<IKeyboardEvent>());
+	public get onRegexKeyDown(): Event<IKeyboardEvent> { return this._onRegexKeyDown.event; }
+
+	constructor(parent: HTMLElement | null, contextViewProvider: IContextViewProvider | undefined, options: IFindInputOptions) {
 		super();
-		this.contextViewProvider = contextViewProvider;
-		this.width = options.width || 100;
 		this.placeholder = options.placeholder || '';
 		this.validation = options.validation;
 		this.label = options.label || NLS_DEFAULT_LABEL;
+		this.showCommonFindToggles = !!options.showCommonFindToggles;
 
-		this.inputActiveOptionBorder = options.inputActiveOptionBorder;
-		this.inputBackground = options.inputBackground;
-		this.inputForeground = options.inputForeground;
+		const appendCaseSensitiveLabel = options.appendCaseSensitiveLabel || '';
+		const appendWholeWordsLabel = options.appendWholeWordsLabel || '';
+		const appendRegexLabel = options.appendRegexLabel || '';
+		const flexibleHeight = !!options.flexibleHeight;
+		const flexibleWidth = !!options.flexibleWidth;
+		const flexibleMaxHeight = options.flexibleMaxHeight;
 
-		this.regex = null;
-		this.wholeWords = null;
-		this.caseSensitive = null;
-		this.domNode = null;
-		this.inputBox = null;
+		this.domNode = document.createElement('div');
+		this.domNode.classList.add('monaco-findInput');
 
-		this.buildDomNode(options.appendCaseSensitiveLabel || '', options.appendWholeWordsLabel || '', options.appendRegexLabel || '');
+		this.inputBox = this._register(new HistoryInputBox(this.domNode, contextViewProvider, {
+			placeholder: this.placeholder || '',
+			ariaLabel: this.label || '',
+			validationOptions: {
+				validation: this.validation
+			},
+			showHistoryHint: options.showHistoryHint,
+			flexibleHeight,
+			flexibleWidth,
+			flexibleMaxHeight,
+			inputBoxStyles: options.inputBoxStyles,
+			history: options.history,
+			actions: options.actions,
+			actionViewItemProvider: options.actionViewItemProvider,
+			hideHoverOnValueChange: options.hideHoverOnValueChange
+		}));
 
-		if (Boolean(parent)) {
-			parent.appendChild(this.domNode);
+		if (this.showCommonFindToggles) {
+			const hoverLifecycleOptions: IHoverLifecycleOptions = options?.hoverLifecycleOptions || { groupId: 'find-input' };
+			this.regex = this._register(new RegexToggle({
+				appendTitle: appendRegexLabel,
+				isChecked: false,
+				hoverLifecycleOptions,
+				...options.toggleStyles
+			}));
+			this._register(this.regex.onChange(viaKeyboard => {
+				this._onDidOptionChange.fire(viaKeyboard);
+				if (!viaKeyboard && this.fixFocusOnOptionClickEnabled) {
+					this.inputBox.focus();
+				}
+				this.validate();
+			}));
+			this._register(this.regex.onKeyDown(e => {
+				this._onRegexKeyDown.fire(e);
+			}));
+
+			this.wholeWords = this._register(new WholeWordsToggle({
+				appendTitle: appendWholeWordsLabel,
+				isChecked: false,
+				hoverLifecycleOptions,
+				...options.toggleStyles
+			}));
+			this._register(this.wholeWords.onChange(viaKeyboard => {
+				this._onDidOptionChange.fire(viaKeyboard);
+				if (!viaKeyboard && this.fixFocusOnOptionClickEnabled) {
+					this.inputBox.focus();
+				}
+				this.validate();
+			}));
+
+			this.caseSensitive = this._register(new CaseSensitiveToggle({
+				appendTitle: appendCaseSensitiveLabel,
+				isChecked: false,
+				hoverLifecycleOptions,
+				...options.toggleStyles
+			}));
+			this._register(this.caseSensitive.onChange(viaKeyboard => {
+				this._onDidOptionChange.fire(viaKeyboard);
+				if (!viaKeyboard && this.fixFocusOnOptionClickEnabled) {
+					this.inputBox.focus();
+				}
+				this.validate();
+			}));
+			this._register(this.caseSensitive.onKeyDown(e => {
+				this._onCaseSensitiveKeyDown.fire(e);
+			}));
+
+			// Arrow-Key support to navigate between options
+			this.onkeydown(this.domNode, (event: IKeyboardEvent) => {
+				navigateToggles(event, this.domNode, () => this.getToggleDomNodes(), () => this.inputBox.focus());
+			});
 		}
+
+		this.controls = document.createElement('div');
+		this.controls.className = 'controls';
+		this.controls.style.display = this.showCommonFindToggles ? '' : 'none';
+		if (this.caseSensitive) {
+			this.controls.append(this.caseSensitive.domNode);
+		}
+		if (this.wholeWords) {
+			this.controls.appendChild(this.wholeWords.domNode);
+		}
+		if (this.regex) {
+			this.controls.appendChild(this.regex.domNode);
+		}
+
+		this.setAdditionalToggles(options?.additionalToggles);
+
+		if (this.controls) {
+			this.domNode.appendChild(this.controls);
+		}
+
+		parent?.appendChild(this.domNode);
+
+		this._register(dom.addDisposableListener(this.inputBox.inputElement, 'compositionstart', (e: CompositionEvent) => {
+			this.imeSessionInProgress = true;
+		}));
+		this._register(dom.addDisposableListener(this.inputBox.inputElement, 'compositionend', (e: CompositionEvent) => {
+			this.imeSessionInProgress = false;
+			this._onInput.fire({ fromCompositionEnd: true });
+		}));
 
 		this.onkeydown(this.inputBox.inputElement, (e) => this._onKeyDown.fire(e));
 		this.onkeyup(this.inputBox.inputElement, (e) => this._onKeyUp.fire(e));
-		this.oninput(this.inputBox.inputElement, (e) => this._onInput.fire());
+		this.oninput(this.inputBox.inputElement, (e) => this._onInput.fire({ fromCompositionEnd: false }));
+		this.onmousedown(this.inputBox.inputElement, (e) => this._onMouseDown.fire(e));
+	}
+
+	public get isImeSessionInProgress(): boolean {
+		return this.imeSessionInProgress;
+	}
+
+	public get onDidChange(): Event<string> {
+		return this.inputBox.onDidChange;
+	}
+
+	public layout(style: { collapsedFindWidget: boolean; narrowFindWidget: boolean; reducedFindWidget: boolean }) {
+		this.inputBox.layout();
+		this.updateInputBoxPadding(style.collapsedFindWidget);
 	}
 
 	public enable(): void {
-		dom.removeClass(this.domNode, 'disabled');
+		this.domNode.classList.remove('disabled');
 		this.inputBox.enable();
-		this.regex.enable();
-		this.wholeWords.enable();
-		this.caseSensitive.enable();
+		this.regex?.enable();
+		this.wholeWords?.enable();
+		this.caseSensitive?.enable();
+
+		for (const toggle of this.additionalToggles) {
+			toggle.enable();
+		}
 	}
 
 	public disable(): void {
-		dom.addClass(this.domNode, 'disabled');
+		this.domNode.classList.add('disabled');
 		this.inputBox.disable();
-		this.regex.disable();
-		this.wholeWords.disable();
-		this.caseSensitive.disable();
+		this.regex?.disable();
+		this.wholeWords?.disable();
+		this.caseSensitive?.disable();
+
+		for (const toggle of this.additionalToggles) {
+			toggle.disable();
+		}
+	}
+
+	public setFocusInputOnOptionClick(value: boolean): void {
+		this.fixFocusOnOptionClickEnabled = value;
 	}
 
 	public setEnabled(enabled: boolean): void {
@@ -123,17 +266,68 @@ export class FindInput extends Widget {
 		}
 	}
 
+	public setAdditionalToggles(toggles: Toggle[] | undefined): void {
+		for (const currentToggle of this.additionalToggles) {
+			currentToggle.domNode.remove();
+		}
+		this.additionalToggles = [];
+		this.additionalTogglesDisposables.value = new DisposableStore();
+
+		for (const toggle of toggles ?? []) {
+			this.additionalTogglesDisposables.value.add(toggle);
+			this.controls.appendChild(toggle.domNode);
+
+			this.additionalTogglesDisposables.value.add(toggle.onChange(viaKeyboard => {
+				this._onDidOptionChange.fire(viaKeyboard);
+				if (!viaKeyboard && this.fixFocusOnOptionClickEnabled) {
+					this.inputBox.focus();
+				}
+			}));
+
+			this.additionalToggles.push(toggle);
+		}
+
+		if (this.additionalToggles.length > 0) {
+			this.controls.style.display = '';
+		}
+
+		this.updateInputBoxPadding();
+	}
+
+	protected getToggleDomNodes(): HTMLElement[] {
+		const nodes: HTMLElement[] = [];
+		if (this.caseSensitive) {
+			nodes.push(this.caseSensitive.domNode);
+		}
+		if (this.wholeWords) {
+			nodes.push(this.wholeWords.domNode);
+		}
+		if (this.regex) {
+			nodes.push(this.regex.domNode);
+		}
+		for (const toggle of this.additionalToggles) {
+			nodes.push(toggle.domNode);
+		}
+		return nodes;
+	}
+
+	public setActions(actions: ReadonlyArray<IAction> | undefined, actionViewItemProvider?: IActionViewItemProvider): void {
+		this.inputBox.setActions(actions, actionViewItemProvider);
+		this.updateInputBoxPadding();
+	}
+
+	private updateInputBoxPadding(controlsHidden = false) {
+		const togglesWidth = controlsHidden
+			? 0
+			: ((this.caseSensitive?.width() ?? 0) + (this.wholeWords?.width() ?? 0) + (this.regex?.width() ?? 0))
+			+ this.additionalToggles.reduce((r, t) => r + t.width(), 0);
+		this.inputBox.paddingRight = togglesWidth + this.inputBox.actionsWidth;
+	}
+
 	public clear(): void {
 		this.clearValidation();
 		this.setValue('');
 		this.focus();
-	}
-
-	public setWidth(newWidth: number): void {
-		this.width = newWidth;
-		this.domNode.style.width = this.width + 'px';
-		this.contextViewProvider.layout();
-		this.setInputWidth();
 	}
 
 	public getValue(): string {
@@ -146,29 +340,8 @@ export class FindInput extends Widget {
 		}
 	}
 
-	public style(styles: IFindInputStyles) {
-		this.inputActiveOptionBorder = styles.inputActiveOptionBorder;
-		this.inputBackground = styles.inputBackground;
-		this.inputForeground = styles.inputForeground;
-
-		this._applyStyles();
-	}
-
-	protected _applyStyles() {
-		if (this.domNode) {
-			const checkBoxStyles: ICheckboxStyles = {
-				inputActiveOptionBorderColor: this.inputActiveOptionBorder,
-			};
-			this.regex.style(checkBoxStyles);
-			this.wholeWords.style(checkBoxStyles);
-			this.caseSensitive.style(checkBoxStyles);
-
-			const inputBoxStyles: IInputBoxStyles = {
-				inputBackground: this.inputBackground,
-				inputForeground: this.inputForeground
-			};
-			this.inputBox.style(inputBoxStyles);
-		}
+	public onSearchSubmit(): void {
+		this.inputBox.addToHistory();
 	}
 
 	public select(): void {
@@ -180,144 +353,49 @@ export class FindInput extends Widget {
 	}
 
 	public getCaseSensitive(): boolean {
-		return this.caseSensitive.checked;
+		return this.caseSensitive?.checked ?? false;
 	}
 
 	public setCaseSensitive(value: boolean): void {
-		this.caseSensitive.checked = value;
-		this.setInputWidth();
+		if (this.caseSensitive) {
+			this.caseSensitive.checked = value;
+		}
 	}
 
 	public getWholeWords(): boolean {
-		return this.wholeWords.checked;
+		return this.wholeWords?.checked ?? false;
 	}
 
 	public setWholeWords(value: boolean): void {
-		this.wholeWords.checked = value;
-		this.setInputWidth();
+		if (this.wholeWords) {
+			this.wholeWords.checked = value;
+		}
 	}
 
 	public getRegex(): boolean {
-		return this.regex.checked;
+		return this.regex?.checked ?? false;
 	}
 
 	public setRegex(value: boolean): void {
-		this.regex.checked = value;
-		this.setInputWidth();
+		if (this.regex) {
+			this.regex.checked = value;
+			this.validate();
+		}
 	}
 
 	public focusOnCaseSensitive(): void {
-		this.caseSensitive.focus();
+		this.caseSensitive?.focus();
+	}
+
+	public focusOnRegex(): void {
+		this.regex?.focus();
 	}
 
 	private _lastHighlightFindOptions: number = 0;
 	public highlightFindOptions(): void {
-		dom.removeClass(this.domNode, 'highlight-' + (this._lastHighlightFindOptions));
+		this.domNode.classList.remove('highlight-' + (this._lastHighlightFindOptions));
 		this._lastHighlightFindOptions = 1 - this._lastHighlightFindOptions;
-		dom.addClass(this.domNode, 'highlight-' + (this._lastHighlightFindOptions));
-	}
-
-	private setInputWidth(): void {
-		let w = this.width - this.caseSensitive.width() - this.wholeWords.width() - this.regex.width();
-		this.inputBox.width = w;
-	}
-
-	private buildDomNode(appendCaseSensitiveLabel: string, appendWholeWordsLabel: string, appendRegexLabel: string): void {
-		this.domNode = document.createElement('div');
-		this.domNode.style.width = this.width + 'px';
-		dom.addClass(this.domNode, 'monaco-findInput');
-
-		this.inputBox = this._register(new InputBox(this.domNode, this.contextViewProvider, {
-			placeholder: this.placeholder || '',
-			ariaLabel: this.label || '',
-			validationOptions: {
-				validation: this.validation || null,
-				showMessage: true
-			},
-			inputBackground: this.inputBackground,
-			inputForeground: this.inputForeground
-		}));
-
-		this.regex = this._register(new RegexCheckbox({
-			appendTitle: appendRegexLabel,
-			isChecked: false,
-			onChange: (viaKeyboard) => {
-				this._onDidOptionChange.fire(viaKeyboard);
-				if (!viaKeyboard) {
-					this.inputBox.focus();
-				}
-				this.setInputWidth();
-				this.validate();
-			},
-			inputActiveOptionBorderColor: this.inputActiveOptionBorder
-		}));
-		this.wholeWords = this._register(new WholeWordsCheckbox({
-			appendTitle: appendWholeWordsLabel,
-			isChecked: false,
-			onChange: (viaKeyboard) => {
-				this._onDidOptionChange.fire(viaKeyboard);
-				if (!viaKeyboard) {
-					this.inputBox.focus();
-				}
-				this.setInputWidth();
-				this.validate();
-			},
-			inputActiveOptionBorderColor: this.inputActiveOptionBorder
-		}));
-		this.caseSensitive = this._register(new CaseSensitiveCheckbox({
-			appendTitle: appendCaseSensitiveLabel,
-			isChecked: false,
-			onChange: (viaKeyboard) => {
-				this._onDidOptionChange.fire(viaKeyboard);
-				if (!viaKeyboard) {
-					this.inputBox.focus();
-				}
-				this.setInputWidth();
-				this.validate();
-			},
-			onKeyDown: (e) => {
-				this._onCaseSensitiveKeyDown.fire(e);
-			},
-			inputActiveOptionBorderColor: this.inputActiveOptionBorder
-		}));
-
-		// Arrow-Key support to navigate between options
-		let indexes = [this.caseSensitive.domNode, this.wholeWords.domNode, this.regex.domNode];
-		this.onkeydown(this.domNode, (event: IKeyboardEvent) => {
-			if (event.equals(KeyCode.LeftArrow) || event.equals(KeyCode.RightArrow) || event.equals(KeyCode.Escape)) {
-				let index = indexes.indexOf(<HTMLElement>document.activeElement);
-				if (index >= 0) {
-					let newIndex: number;
-					if (event.equals(KeyCode.RightArrow)) {
-						newIndex = (index + 1) % indexes.length;
-					} else if (event.equals(KeyCode.LeftArrow)) {
-						if (index === 0) {
-							newIndex = indexes.length - 1;
-						} else {
-							newIndex = index - 1;
-						}
-					}
-
-					if (event.equals(KeyCode.Escape)) {
-						indexes[index].blur();
-					} else if (newIndex >= 0) {
-						indexes[newIndex].focus();
-					}
-
-					dom.EventHelper.stop(event, true);
-				}
-			}
-		});
-
-		this.setInputWidth();
-
-		let controls = document.createElement('div');
-		controls.className = 'controls';
-		controls.appendChild(this.caseSensitive.domNode);
-		controls.appendChild(this.wholeWords.domNode);
-		controls.appendChild(this.regex.domNode);
-
-		this.domNode.appendChild(controls);
+		this.domNode.classList.add('highlight-' + (this._lastHighlightFindOptions));
 	}
 
 	public validate(): void {
@@ -334,9 +412,5 @@ export class FindInput extends Widget {
 
 	private clearValidation(): void {
 		this.inputBox.hideMessage();
-	}
-
-	public dispose(): void {
-		super.dispose();
 	}
 }

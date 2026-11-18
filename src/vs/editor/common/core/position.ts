@@ -2,9 +2,20 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import { IPosition } from 'vs/editor/common/editorCommon';
+/**
+ * A position in the editor. This interface is suitable for serialization.
+ */
+export interface IPosition {
+	/**
+	 * line number (starts at 1)
+	 */
+	readonly lineNumber: number;
+	/**
+	 * column (the first character in a line is between column 1 and column 2)
+	 */
+	readonly column: number;
+}
 
 /**
  * A position in the editor.
@@ -25,6 +36,30 @@ export class Position {
 	}
 
 	/**
+	 * Create a new position from this position.
+	 *
+	 * @param newLineNumber new line number
+	 * @param newColumn new column
+	 */
+	with(newLineNumber: number = this.lineNumber, newColumn: number = this.column): Position {
+		if (newLineNumber === this.lineNumber && newColumn === this.column) {
+			return this;
+		} else {
+			return new Position(newLineNumber, newColumn);
+		}
+	}
+
+	/**
+	 * Derive a new position from this position.
+	 *
+	 * @param deltaLineNumber line number delta
+	 * @param deltaColumn column delta
+	 */
+	delta(deltaLineNumber: number = 0, deltaColumn: number = 0): Position {
+		return this.with(Math.max(1, this.lineNumber + deltaLineNumber), Math.max(1, this.column + deltaColumn));
+	}
+
+	/**
 	 * Test if this position equals other position
 	 */
 	public equals(other: IPosition): boolean {
@@ -34,7 +69,7 @@ export class Position {
 	/**
 	 * Test if position `a` equals position `b`
 	 */
-	public static equals(a: IPosition, b: IPosition): boolean {
+	public static equals(a: IPosition | null, b: IPosition | null): boolean {
 		if (!a && !b) {
 			return true;
 		}
@@ -94,12 +129,12 @@ export class Position {
 	 * A function that compares positions, useful for sorting
 	 */
 	public static compare(a: IPosition, b: IPosition): number {
-		let aLineNumber = a.lineNumber | 0;
-		let bLineNumber = b.lineNumber | 0;
+		const aLineNumber = a.lineNumber | 0;
+		const bLineNumber = b.lineNumber | 0;
 
 		if (aLineNumber === bLineNumber) {
-			let aColumn = a.column | 0;
-			let bColumn = b.column | 0;
+			const aColumn = a.column | 0;
+			const bColumn = b.column | 0;
 			return aColumn - bColumn;
 		}
 
@@ -132,11 +167,18 @@ export class Position {
 	/**
 	 * Test if `obj` is an `IPosition`.
 	 */
-	public static isIPosition(obj: any): obj is IPosition {
+	public static isIPosition(obj: unknown): obj is IPosition {
 		return (
-			obj
-			&& (typeof obj.lineNumber === 'number')
-			&& (typeof obj.column === 'number')
+			!!obj
+			&& (typeof (obj as IPosition).lineNumber === 'number')
+			&& (typeof (obj as IPosition).column === 'number')
 		);
+	}
+
+	public toJSON(): IPosition {
+		return {
+			lineNumber: this.lineNumber,
+			column: this.column
+		};
 	}
 }

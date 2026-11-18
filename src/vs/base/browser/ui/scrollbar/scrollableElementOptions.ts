@@ -2,15 +2,10 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import { ScrollbarVisibility } from 'vs/base/common/scrollable';
+import { ScrollbarVisibility } from '../../../common/scrollable.js';
 
 export interface ScrollableElementCreationOptions {
-	/**
-	 * Allow scrollbar rendering to use translate3d.
-	 */
-	canUseTranslate3d: boolean;
 	/**
 	 * The scrollable element should not do any DOM mutations until renderNow() is called.
 	 * Defaults to false.
@@ -31,6 +26,15 @@ export interface ScrollableElementCreationOptions {
 	 */
 	handleMouseWheel?: boolean;
 	/**
+	 * If mouse wheel is handled, make mouse wheel scrolling smooth.
+	 * Defaults to true.
+	 */
+	mouseWheelSmoothScroll?: boolean;
+	/**
+	 * Make scrolling inertial - mostly useful with touchpad on linux.
+	 */
+	inertialScroll?: boolean;
+	/**
 	 * Flip axes. Treat vertical scrolling like horizontal and vice-versa.
 	 * Defaults to false.
 	 */
@@ -41,6 +45,11 @@ export interface ScrollableElementCreationOptions {
 	 */
 	scrollYToX?: boolean;
 	/**
+	 * Consume all mouse wheel events if a scrollbar is needed (i.e. scrollSize > size).
+	 * Defaults to false.
+	 */
+	consumeMouseWheelIfScrollbarIsNeeded?: boolean;
+	/**
 	 * Always consume mouse wheel events, even when scrolling is no longer possible.
 	 * Defaults to false.
 	 */
@@ -50,6 +59,18 @@ export interface ScrollableElementCreationOptions {
 	 * Defaults to 1.
 	 */
 	mouseWheelScrollSensitivity?: number;
+	/**
+	 * FastScrolling mulitplier speed when pressing `Alt`
+	 * Defaults to 5.
+	 */
+	fastScrollSensitivity?: number;
+	/**
+	 * Whether the scrollable will only scroll along the predominant axis when scrolling both
+	 * vertically and horizontally at the same time.
+	 * Prevents horizontal drift when scrolling vertically on a trackpad.
+	 * Defaults to true.
+	 */
+	scrollPredominantAxis?: boolean;
 	/**
 	 * Height for vertical arrows (top/bottom) and width for horizontal arrows (left/right).
 	 * Defaults to 11.
@@ -102,26 +123,41 @@ export interface ScrollableElementCreationOptions {
 	 * Defaults to false.
 	 */
 	verticalHasArrows?: boolean;
+	/**
+	 * Scroll gutter clicks move by page vs. jump to position.
+	 * Defaults to false.
+	 */
+	scrollByPage?: boolean;
 }
 
 export interface ScrollableElementChangeOptions {
-	canUseTranslate3d: boolean;
 	handleMouseWheel?: boolean;
 	mouseWheelScrollSensitivity?: number;
+	fastScrollSensitivity?: number;
+	scrollPredominantAxis?: boolean;
+	horizontal?: ScrollbarVisibility;
+	horizontalScrollbarSize?: number;
+	vertical?: ScrollbarVisibility;
+	verticalScrollbarSize?: number;
+	scrollByPage?: boolean;
 }
 
 export interface ScrollableElementResolvedOptions {
-	canUseTranslate3d: boolean;
 	lazyRender: boolean;
 	className: string;
 	useShadows: boolean;
 	handleMouseWheel: boolean;
 	flipAxes: boolean;
 	scrollYToX: boolean;
+	consumeMouseWheelIfScrollbarIsNeeded: boolean;
 	alwaysConsumeMouseWheel: boolean;
 	mouseWheelScrollSensitivity: number;
+	fastScrollSensitivity: number;
+	scrollPredominantAxis: boolean;
+	mouseWheelSmoothScroll: boolean;
+	inertialScroll: boolean;
 	arrowSize: number;
-	listenOnDomNode: HTMLElement;
+	listenOnDomNode: HTMLElement | null;
 	horizontal: ScrollbarVisibility;
 	horizontalScrollbarSize: number;
 	horizontalSliderSize: number;
@@ -130,4 +166,5 @@ export interface ScrollableElementResolvedOptions {
 	verticalScrollbarSize: number;
 	verticalSliderSize: number;
 	verticalHasArrows: boolean;
+	scrollByPage: boolean;
 }

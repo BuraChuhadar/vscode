@@ -3,73 +3,93 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
+import { Emitter, Event } from '../../../base/common/event.js';
+import { DisposableStore } from '../../../base/common/lifecycle.js';
+import { IChannel, IServerChannel } from '../../../base/parts/ipc/common/ipc.js';
+import { IUpdateService, State } from './update.js';
 
-import { TPromise } from 'vs/base/common/winjs.base';
-import { IChannel, eventToCall, eventFromCall } from 'vs/base/parts/ipc/common/ipc';
-import Event from 'vs/base/common/event';
-import { IUpdateService, IRawUpdate, State, IUpdate } from './update';
-
-export interface IUpdateChannel extends IChannel {
-	call(command: 'event:onError'): TPromise<void>;
-	call(command: 'event:onUpdateAvailable'): TPromise<void>;
-	call(command: 'event:onUpdateNotAvailable'): TPromise<void>;
-	call(command: 'event:onUpdateReady'): TPromise<void>;
-	call(command: 'event:onStateChange'): TPromise<void>;
-	call(command: 'checkForUpdates', arg: boolean): TPromise<IUpdate>;
-	call(command: 'quitAndInstall'): TPromise<void>;
-	call(command: string, arg?: any): TPromise<any>;
-}
-
-export class UpdateChannel implements IUpdateChannel {
+export class UpdateChannel implements IServerChannel {
 
 	constructor(private service: IUpdateService) { }
 
-	call(command: string, arg?: any): TPromise<any> {
-		switch (command) {
-			case 'event:onError': return eventToCall(this.service.onError);
-			case 'event:onUpdateAvailable': return eventToCall(this.service.onUpdateAvailable);
-			case 'event:onUpdateNotAvailable': return eventToCall(this.service.onUpdateNotAvailable);
-			case 'event:onUpdateReady': return eventToCall(this.service.onUpdateReady);
-			case 'event:onStateChange': return eventToCall(this.service.onStateChange);
-			case 'checkForUpdates': return this.service.checkForUpdates(arg);
-			case 'quitAndInstall': return this.service.quitAndInstall();
+	listen(_: unknown, event: string): Event<any> {
+		switch (event) {
+			case 'onStateChange': return this.service.onStateChange;
 		}
-		return undefined;
+
+		throw new Error(`Event not found: ${event}`);
+	}
+
+	call(_: unknown, command: string, arg?: any): Promise<any> {
+		switch (command) {
+			case 'checkForUpdates': return this.service.checkForUpdates(arg);
+			case 'downloadUpdate': return this.service.downloadUpdate(arg);
+			case 'applyUpdate': return this.service.applyUpdate();
+			case 'quitAndInstall': return this.service.quitAndInstall();
+			case '_getInitialState': return Promise.resolve(this.service.state);
+			case 'isLatestVersion': return this.service.isLatestVersion();
+			case '_applySpecificUpdate': return this.service._applySpecificUpdate(arg);
+			case 'setInternalOrg': return this.service.setInternalOrg(arg);
+			case 'setEarlyStagingDefault': return this.service.setEarlyStagingDefault(arg);
+		}
+
+		throw new Error(`Call not found: ${command}`);
 	}
 }
 
 export class UpdateChannelClient implements IUpdateService {
 
-	_serviceBrand: any;
+	declare readonly _serviceBrand: undefined;
+	private readonly disposables = new DisposableStore();
 
-	private _onError = eventFromCall<any>(this.channel, 'event:onError');
-	get onError(): Event<any> { return this._onError; }
-
-	private _onUpdateAvailable = eventFromCall<{ url: string; version: string; }>(this.channel, 'event:onUpdateAvailable');
-	get onUpdateAvailable(): Event<{ url: string; version: string; }> { return this._onUpdateAvailable; }
-
-	private _onUpdateNotAvailable = eventFromCall<boolean>(this.channel, 'event:onUpdateNotAvailable');
-	get onUpdateNotAvailable(): Event<boolean> { return this._onUpdateNotAvailable; }
-
-	private _onUpdateReady = eventFromCall<IRawUpdate>(this.channel, 'event:onUpdateReady');
-	get onUpdateReady(): Event<IRawUpdate> { return this._onUpdateReady; }
-
-	private _onStateChange = eventFromCall<State>(this.channel, 'event:onStateChange');
-	get onStateChange(): Event<State> { return this._onStateChange; }
+	private readonly _onStateChange = this.disposables.add(new Emitter<State>());
+	readonly onStateChange: Event<State> = this._onStateChange.event;
 
 	private _state: State = State.Uninitialized;
-	get state(): State { return this._state; };
-
-	constructor(private channel: IChannel) {
-		this.onStateChange(state => this._state = state);
+	get state(): State { return this._state; }
+	set state(state: State) {
+		this._state = state;
+		this._onStateChange.fire(state);
 	}
 
-	checkForUpdates(explicit: boolean): TPromise<IUpdate> {
+	constructor(private readonly channel: IChannel) {
+		this.disposables.add(this.channel.listen<State>('onStateChange')(state => this.state = state));
+		this.channel.call<State>('_getInitialState').then(state => this.state = state);
+	}
+
+	checkForUpdates(explicit: boolean): Promise<void> {
 		return this.channel.call('checkForUpdates', explicit);
 	}
 
-	quitAndInstall(): TPromise<void> {
+	downloadUpdate(explicit: boolean): Promise<void> {
+		return this.channel.call('downloadUpdate', explicit);
+	}
+
+	applyUpdate(): Promise<void> {
+		return this.channel.call('applyUpdate');
+	}
+
+	quitAndInstall(): Promise<void> {
 		return this.channel.call('quitAndInstall');
+	}
+
+	isLatestVersion(): Promise<boolean | undefined> {
+		return this.channel.call('isLatestVersion');
+	}
+
+	_applySpecificUpdate(packagePath: string): Promise<void> {
+		return this.channel.call('_applySpecificUpdate', packagePath);
+	}
+
+	setInternalOrg(internalOrg: string | undefined): Promise<void> {
+		return this.channel.call('setInternalOrg', internalOrg);
+	}
+
+	setEarlyStagingDefault(enabled: boolean): Promise<void> {
+		return this.channel.call('setEarlyStagingDefault', enabled);
+	}
+
+	dispose(): void {
+		this.disposables.dispose();
 	}
 }

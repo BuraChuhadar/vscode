@@ -1,13 +1,14 @@
 {
   "name": "gulp",
   "publisher": "vscode",
-  "description": "Extension to add Gulp capabilities to VSCode.",
-  "displayName": "Gulp support for VSCode",
-  "version": "0.0.1",
+  "description": "%description%",
+  "displayName": "%displayName%",
+  "version": "10.0.0",
+  "icon": "images/gulp.png",
+  "license": "MIT",
   "engines": {
     "vscode": "*"
   },
-  "enableProposedApi": true,
   "categories": [
     "Other"
   ],
@@ -15,16 +16,60 @@
     "compile": "gulp compile-extension:gulp",
     "watch": "gulp watch-extension:gulp"
   },
-  "dependencies": {
-    "vscode-nls": "^2.0.2"
-  },
+  "dependencies": {},
   "devDependencies": {
-    "@types/node": "^7.0.4"
+    "@types/node": "24.x"
   },
   "main": "./out/main",
   "activationEvents": [
-    "onCommand:workbench.action.tasks.runTask",
-    "onCommand:workbench.action.tasks.build",
-    "onCommand:workbench.action.tasks.test"
-  ]
+    "onTaskType:gulp"
+  ],
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "contributes": {
+    "configuration": {
+      "id": "gulp",
+      "type": "object",
+      "title": "Gulp",
+      "properties": {
+        "gulp.autoDetect": {
+          "scope": "application",
+          "type": "string",
+          "enum": [
+            "off",
+            "on"
+          ],
+          "default": "off",
+          "description": "%config.gulp.autoDetect%"
+        }
+      }
+    },
+    "taskDefinitions": [
+      {
+        "type": "gulp",
+        "required": [
+          "task"
+        ],
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "%gulp.taskDefinition.type.description%"
+          },
+          "file": {
+            "type": "string",
+            "description": "%gulp.taskDefinition.file.description%"
+          }
+        },
+        "when": "shellExecutionSupported"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/vscode.git"
+  }
 }

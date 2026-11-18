@@ -2,17 +2,17 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import * as platform from 'vs/base/common/platform';
-import * as browser from 'vs/base/browser/browser';
-import { IframeUtils } from 'vs/base/browser/iframe';
+import * as browser from './browser.js';
+import { IframeUtils } from './iframe.js';
+import * as platform from '../common/platform.js';
 
 export interface IMouseEvent {
 	readonly browserEvent: MouseEvent;
 	readonly leftButton: boolean;
 	readonly middleButton: boolean;
 	readonly rightButton: boolean;
+	readonly buttons: number;
 	readonly target: HTMLElement;
 	readonly detail: number;
 	readonly posx: number;
@@ -22,6 +22,7 @@ export interface IMouseEvent {
 	readonly altKey: boolean;
 	readonly metaKey: boolean;
 	readonly timestamp: number;
+	readonly defaultPrevented: boolean;
 
 	preventDefault(): void;
 	stopPropagation(): void;
@@ -34,6 +35,7 @@ export class StandardMouseEvent implements IMouseEvent {
 	public readonly leftButton: boolean;
 	public readonly middleButton: boolean;
 	public readonly rightButton: boolean;
+	public readonly buttons: number;
 	public readonly target: HTMLElement;
 	public detail: number;
 	public readonly posx: number;
@@ -43,13 +45,16 @@ export class StandardMouseEvent implements IMouseEvent {
 	public readonly altKey: boolean;
 	public readonly metaKey: boolean;
 	public readonly timestamp: number;
+	public readonly defaultPrevented: boolean;
 
-	constructor(e: MouseEvent) {
+	constructor(targetWindow: Window, e: MouseEvent) {
 		this.timestamp = Date.now();
 		this.browserEvent = e;
 		this.leftButton = e.button === 0;
 		this.middleButton = e.button === 1;
 		this.rightButton = e.button === 2;
+		this.buttons = e.buttons;
+		this.defaultPrevented = e.defaultPrevented;
 
 		this.target = <HTMLElement>e.target;
 
@@ -62,64 +67,44 @@ export class StandardMouseEvent implements IMouseEvent {
 		this.altKey = e.altKey;
 		this.metaKey = e.metaKey;
 
-		if (typeof e.pageX === 'number') {
-			this.posx = e.pageX;
-			this.posy = e.pageY;
-		} else {
-			// Probably hit by MSGestureEvent
-			this.posx = e.clientX + document.body.scrollLeft + document.documentElement.scrollLeft;
-			this.posy = e.clientY + document.body.scrollTop + document.documentElement.scrollTop;
-		}
+		this.posx = e.pageX;
+		this.posy = e.pageY;
 
 		// Find the position of the iframe this code is executing in relative to the iframe where the event was captured.
-		let iframeOffsets = IframeUtils.getPositionOfChildWindowRelativeToAncestorWindow(self, e.view);
+		const iframeOffsets = IframeUtils.getPositionOfChildWindowRelativeToAncestorWindow(targetWindow, e.view);
 		this.posx -= iframeOffsets.left;
 		this.posy -= iframeOffsets.top;
 	}
 
 	public preventDefault(): void {
-		if (this.browserEvent.preventDefault) {
-			this.browserEvent.preventDefault();
-		}
+		this.browserEvent.preventDefault();
 	}
 
 	public stopPropagation(): void {
-		if (this.browserEvent.stopPropagation) {
-			this.browserEvent.stopPropagation();
-		}
+		this.browserEvent.stopPropagation();
 	}
-}
-
-export interface IDataTransfer {
-	dropEffect: string;
-	effectAllowed: string;
-	types: any[];
-	files: any[];
-
-	setData(type: string, data: string): void;
-	setDragImage(image: any, x: number, y: number): void;
-
-	getData(type: string): string;
-	clearData(types?: string[]): void;
 }
 
 export class DragMouseEvent extends StandardMouseEvent {
 
-	public readonly dataTransfer: IDataTransfer;
+	public readonly dataTransfer: DataTransfer;
 
-	constructor(e: MouseEvent) {
-		super(e);
+	constructor(targetWindow: Window, e: MouseEvent) {
+		super(targetWindow, e);
+		// eslint-disable-next-line local/code-no-any-casts
 		this.dataTransfer = (<any>e).dataTransfer;
 	}
-
 }
 
-export class DropMouseEvent extends DragMouseEvent {
+export interface IMouseWheelEvent extends MouseEvent {
+	readonly wheelDelta: number;
+	readonly wheelDeltaX: number;
+	readonly wheelDeltaY: number;
 
-	constructor(e: MouseEvent) {
-		super(e);
-	}
-
+	readonly deltaX: number;
+	readonly deltaY: number;
+	readonly deltaZ: number;
+	readonly deltaMode: number;
 }
 
 interface IWebKitMouseWheelEvent {
@@ -134,63 +119,112 @@ interface IGeckoMouseWheelEvent {
 	detail: number;
 }
 
-export class StandardMouseWheelEvent {
+export class StandardWheelEvent {
 
-	public readonly browserEvent: MouseWheelEvent;
+	public readonly browserEvent: IMouseWheelEvent | null;
 	public readonly deltaY: number;
 	public readonly deltaX: number;
 	public readonly target: Node;
 
-	constructor(e: MouseWheelEvent, deltaX: number = 0, deltaY: number = 0) {
+	constructor(e: IMouseWheelEvent | null, deltaX: number = 0, deltaY: number = 0) {
 
 		this.browserEvent = e || null;
+		// eslint-disable-next-line local/code-no-any-casts
 		this.target = e ? (e.target || (<any>e).targetNode || e.srcElement) : null;
 
 		this.deltaY = deltaY;
 		this.deltaX = deltaX;
 
+		let shouldFactorDPR: boolean = false;
+		if (browser.isChrome) {
+			// Chrome version >= 123 contains the fix to factor devicePixelRatio into the wheel event.
+			// See https://chromium.googlesource.com/chromium/src.git/+/be51b448441ff0c9d1f17e0f25c4bf1ab3f11f61
+			const chromeVersionMatch = navigator.userAgent.match(/Chrome\/(\d+)/);
+			const chromeMajorVersion = chromeVersionMatch ? parseInt(chromeVersionMatch[1]) : 123;
+			shouldFactorDPR = chromeMajorVersion <= 122;
+		}
+
 		if (e) {
-			let e1 = <IWebKitMouseWheelEvent><any>e;
-			let e2 = <IGeckoMouseWheelEvent><any>e;
+			// Old (deprecated) wheel events
+			// eslint-disable-next-line local/code-no-any-casts
+			const e1 = <IWebKitMouseWheelEvent><any>e;
+			// eslint-disable-next-line local/code-no-any-casts
+			const e2 = <IGeckoMouseWheelEvent><any>e;
+			const devicePixelRatio = e.view?.devicePixelRatio || 1;
 
 			// vertical delta scroll
 			if (typeof e1.wheelDeltaY !== 'undefined') {
-				this.deltaY = e1.wheelDeltaY / 120;
+				if (shouldFactorDPR) {
+					// Refs https://github.com/microsoft/vscode/issues/146403#issuecomment-1854538928
+					this.deltaY = e1.wheelDeltaY / (120 * devicePixelRatio);
+				} else {
+					this.deltaY = e1.wheelDeltaY / 120;
+				}
 			} else if (typeof e2.VERTICAL_AXIS !== 'undefined' && e2.axis === e2.VERTICAL_AXIS) {
 				this.deltaY = -e2.detail / 3;
+			} else if (e.type === 'wheel') {
+				// Modern wheel event
+				// https://developer.mozilla.org/en-US/docs/Web/API/WheelEvent
+				const ev = <WheelEvent><unknown>e;
+
+				if (ev.deltaMode === ev.DOM_DELTA_LINE) {
+					// the deltas are expressed in lines
+					if (browser.isFirefox && !platform.isMacintosh) {
+						this.deltaY = -e.deltaY / 3;
+					} else {
+						this.deltaY = -e.deltaY;
+					}
+				} else {
+					this.deltaY = -e.deltaY / 40;
+				}
 			}
 
 			// horizontal delta scroll
 			if (typeof e1.wheelDeltaX !== 'undefined') {
 				if (browser.isSafari && platform.isWindows) {
-					this.deltaX = - (e1.wheelDeltaX / 120);
+					this.deltaX = -(e1.wheelDeltaX / 120);
+				} else if (shouldFactorDPR) {
+					// Refs https://github.com/microsoft/vscode/issues/146403#issuecomment-1854538928
+					this.deltaX = e1.wheelDeltaX / (120 * devicePixelRatio);
 				} else {
 					this.deltaX = e1.wheelDeltaX / 120;
 				}
 			} else if (typeof e2.HORIZONTAL_AXIS !== 'undefined' && e2.axis === e2.HORIZONTAL_AXIS) {
 				this.deltaX = -e.detail / 3;
+			} else if (e.type === 'wheel') {
+				// Modern wheel event
+				// https://developer.mozilla.org/en-US/docs/Web/API/WheelEvent
+				const ev = <WheelEvent><unknown>e;
+
+				if (ev.deltaMode === ev.DOM_DELTA_LINE) {
+					// the deltas are expressed in lines
+					if (browser.isFirefox && !platform.isMacintosh) {
+						this.deltaX = -e.deltaX / 3;
+					} else {
+						this.deltaX = -e.deltaX;
+					}
+				} else {
+					this.deltaX = -e.deltaX / 40;
+				}
 			}
 
 			// Assume a vertical scroll if nothing else worked
 			if (this.deltaY === 0 && this.deltaX === 0 && e.wheelDelta) {
-				this.deltaY = e.wheelDelta / 120;
+				if (shouldFactorDPR) {
+					// Refs https://github.com/microsoft/vscode/issues/146403#issuecomment-1854538928
+					this.deltaY = e.wheelDelta / (120 * devicePixelRatio);
+				} else {
+					this.deltaY = e.wheelDelta / 120;
+				}
 			}
 		}
 	}
 
 	public preventDefault(): void {
-		if (this.browserEvent) {
-			if (this.browserEvent.preventDefault) {
-				this.browserEvent.preventDefault();
-			}
-		}
+		this.browserEvent?.preventDefault();
 	}
 
 	public stopPropagation(): void {
-		if (this.browserEvent) {
-			if (this.browserEvent.stopPropagation) {
-				this.browserEvent.stopPropagation();
-			}
-		}
+		this.browserEvent?.stopPropagation();
 	}
 }
